@@ -39,16 +39,28 @@ proves the holes with real requests, and produces a consultant-grade report.
 
 ## Quick start
 
+The fastest way — an interactive wizard:
+
+```bash
+pip install -e .
+kuv
+```
+
+It asks for your Anthropic key (hidden input, never saved to disk), the site you want
+to check, and an explicit **authorization confirmation** — then runs a read-only
+assessment and drops a **PDF report on your Desktop**. For automatic PDF it uses a
+headless Chrome if you have one, or `pip install '.[pdf]'` for a bundled renderer.
+
+---
+
+Prefer to drive it yourself? Install, test, and try the bundled **local vulnerable
+fixture** (touches only localhost, reproduces a real authorization bug):
+
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 pytest -q
-```
 
-Try it end-to-end against the bundled **local vulnerable fixture** (touches only
-localhost, reproduces a real authorization bug):
-
-```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 python assess_fixture.py
 ```

@@ -15,6 +15,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+pdf = ["playwright>=1.44"]   # optional: automatic HTML->PDF (else a headless Chrome is used)
+
+[project.scripts]
+kuv = "kuv.wizard:main"
 
 [build-system]
 requires = ["hatchling"]
