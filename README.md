@@ -1,5 +1,7 @@
 # Kill-Ur-Vibe
 
+[![CI](https://github.com/DavidGao520/Kill-Ur-Vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/DavidGao520/Kill-Ur-Vibe/actions/workflows/ci.yml)
+
 **A security assessment CLI for AI-built ("vibe-coded") web apps.**
 
 You shipped an app with Lovable, v0, Cursor, Bolt, or Replit. The AI wrote a clean
