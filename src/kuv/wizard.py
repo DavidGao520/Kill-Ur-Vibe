@@ -133,14 +133,28 @@ def main() -> int:
             return 1
         os.environ["ANTHROPIC_API_KEY"] = key
 
-    # 2) Target URL.
+    # 2) Model. (Independent of auth. Access to a model depends on your plan/API org.)
+    models = {
+        "1": "claude-sonnet-5",
+        "2": "claude-opus-5",
+        "3": "claude-fable-5",
+        "4": "claude-haiku-4-5-20251001",
+    }
+    print("\nWhich model?")
+    print("  [1] Sonnet 5   — fast + capable (default)")
+    print("  [2] Opus 5     — most capable, best at subtle authz bugs (more $ / quota)")
+    print("  [3] Fable 5")
+    print("  [4] Haiku 4.5  — cheapest / fastest")
+    model = os.environ.get("KUV_MODEL") or models.get((_ask("Choose [1-4] (default 1): ") or "1").strip(), "claude-sonnet-5")
+
+    # 3) Target URL.
     try:
         url, host, apex = parse_target(_ask("\nWhich site do you want to check? (URL): "))
     except ValueError as exc:
         print(f"  {exc}")
         return 1
 
-    # 3) Authorization confirmation — the load-bearing gate.
+    # 4) Authorization confirmation — the load-bearing gate.
     print(
         f"\n⚠  kuv will actively security-test  {host}  (and *.{apex}).\n"
         f"   It sends real requests. This run is READ-ONLY (it never changes your data).\n"
@@ -155,11 +169,11 @@ def main() -> int:
     budget = RunBudget(max_requests=100, max_wall_seconds=600.0)
 
     pay = "your Claude subscription (no API fees)" if use_subscription else "your Anthropic key (≤ $2)"
-    print(f"\nAssessing {url} … (a few minutes; {pay}; capped at "
+    print(f"\nAssessing {url} … (a few minutes; {model}; {pay}; capped at "
           f"{budget.max_requests} calls / {int(budget.max_wall_seconds // 60)} min)")
-    result = asyncio.run(run_assessment(scope, url, now=date.today, budget=budget))
+    result = asyncio.run(run_assessment(scope, url, now=date.today, budget=budget, model=model))
 
-    # 4) Report → PDF on the Desktop.
+    # 5) Report → PDF on the Desktop.
     html = assemble_html_report(
         result.findings,
         target=host,
