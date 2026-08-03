@@ -28,6 +28,7 @@ from kuv.recon.dns import (
     takeover_suffix,
 )
 from kuv.recon.dns import enumerate_subdomains as _dns_enumerate
+from kuv.recon.paths import PATH_WORDLIST, extract_paths, extract_scripts, rank_paths
 from kuv.recon.tls import TlsProbe, ssl_tls_probe
 from kuv.recon.websocket import WsProbe, flags_sensitive, summarize_fields, websockets_probe
 from kuv.report import Finding
@@ -353,6 +354,74 @@ class AssessmentSession:
             "sensitive_fields": flags_sensitive(summary),
             "frames_result": frames_note,
             "error": frame.error,
+        }
+
+    async def discover_paths(
+        self, url: str, probe_wordlist: bool = False, max_bundles: int = 6
+    ) -> dict:
+        """Discover routes/endpoints on an in-scope host: extract every `/path` from the
+        page HTML + its same-origin JS bundles (SPA router tables, links, fetch() calls),
+        and — if `probe_wordlist` — additionally probe a curated list of common/sensitive
+        paths. Every fetch/probe is egress-gated and charges the run budget; probing stops
+        when the budget refuses. Returns deduped, ranked paths with how each was found."""
+        from urllib.parse import urljoin, urlparse
+
+        verdict = self.engine.evaluate(EgressRequest("GET", url))
+        if verdict.decision is not Decision.ALLOW:
+            return {"ok": False, "error": f"REFUSED: {verdict.reason}"}
+        try:
+            resp = await self.client.get(url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"request error: {exc}"}
+
+        html = resp.text
+        in_scope = self.engine.in_scope
+        source: dict[str, str] = {p: "html" for p in extract_paths(html, in_scope)}
+
+        bundles: list[str] = []
+        for rel in sorted(extract_scripts(html, in_scope))[:max_bundles]:
+            burl = urljoin(url, rel)
+            bv = self.engine.evaluate(EgressRequest("GET", burl))
+            if bv.decision is not Decision.ALLOW:
+                continue                              # off-scope CDN / budget → skip bundle
+            try:
+                br = await self.client.get(burl)
+            except Exception:  # noqa: BLE001
+                continue
+            bundles.append(rel)
+            for p in extract_paths(br.text, in_scope):
+                source.setdefault(p, "bundle")
+
+        probed: list[dict] = []
+        if probe_wordlist:
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.netloc}/"
+            for word in PATH_WORDLIST:
+                purl = urljoin(origin, word)
+                pv = self.engine.evaluate(EgressRequest("GET", purl))
+                if pv.decision is not Decision.ALLOW:
+                    if "budget" in pv.reason.lower():
+                        break                          # budget exhausted → stop probing
+                    continue                           # off-scope → skip this word
+                try:
+                    pr = await self.client.get(purl)
+                except Exception:  # noqa: BLE001
+                    continue
+                probed.append({"path": "/" + word, "status": pr.status_code})
+                if pr.status_code < 400:
+                    source.setdefault("/" + word, "probe")
+
+        ranked = rank_paths(source.keys())
+        cap = 120
+        truncated = max(0, len(ranked) - cap)
+        return {
+            "ok": True,
+            "url": url,
+            "count": len(ranked),
+            "truncated": truncated,
+            "paths": [{"path": p, "source": source.get(p, "?")} for p in ranked[:cap]],
+            "bundles_scanned": bundles,
+            "probed": probed,
         }
 
     def check_tls(self, host: str) -> dict:

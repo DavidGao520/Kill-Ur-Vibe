@@ -33,6 +33,7 @@ TOOL_NAMES = (
     "mcp__kuvnet__check_http_posture",
     "mcp__kuvnet__analyze_oauth",
     "mcp__kuvnet__check_tls",
+    "mcp__kuvnet__discover_paths",
 )
 
 
@@ -193,6 +194,23 @@ def build_network_server(session: AssessmentSession):
     async def check_tls_tool(args):
         return _wrap(session.check_tls(args["host"]))
 
+    @tool(
+        "discover_paths",
+        "Discover routes/endpoints on an in-scope host. Fetches the page + its same-origin "
+        "JS bundles and extracts every `/path` they reference (SPA router tables, links, "
+        "fetch() calls) — this surfaces routes like /account/login and /events that live in "
+        "the bundle, not just the HTML. Set probe_wordlist=true to ALSO probe a curated list "
+        "of common/sensitive paths (/admin, /api, /.env, /.git/config, …) and report which "
+        "exist. Every fetch/probe is egress-gated and budget-charged. Returns deduped paths "
+        "(high-signal first) with how each was found. Run in recon, then http_get the "
+        "interesting ones.",
+        {"url": str, "probe_wordlist": bool},
+    )
+    async def discover_paths_tool(args):
+        return _wrap(await session.discover_paths(
+            args["url"], bool(args.get("probe_wordlist", False))
+        ))
+
     return create_sdk_mcp_server(
         SERVER_NAME,
         "0.1.0",
@@ -210,5 +228,6 @@ def build_network_server(session: AssessmentSession):
             check_http_posture_tool,
             analyze_oauth_tool,
             check_tls_tool,
+            discover_paths_tool,
         ],
     )

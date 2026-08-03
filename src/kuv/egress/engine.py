@@ -2,7 +2,7 @@
 
 Stateless per request except for the operator-confirmed write classes. Re-evaluate
 EVERY redirect hop — a redirect off-scope is refused, not followed
-.
+(DESIGN-active-cli.md §Authorization Gate, Codex #1/#2/#4).
 """
 
 from __future__ import annotations
@@ -72,6 +72,12 @@ class EgressEngine:
     def confirm(self, action_class: ActionClass) -> None:
         """Record operator confirmation for the first live write of a class."""
         self._confirmed.add(action_class)
+
+    def in_scope(self, host: str) -> bool:
+        """Side-effect-free scope membership check (no budget charge, no audit) — for
+        pre-filtering candidate hosts (e.g. which discovered URLs are worth gating)."""
+        host = (host or "").lower()
+        return bool(host) and self._now() <= self._scope.expires_at and self._scope.host_in_scope(host)
 
     def check_host(self, host: str, *, kind: str = "dns") -> tuple[bool, str]:
         """Gate a non-HTTP egress (a DNS lookup, a full-bundle scan fetch): scope +

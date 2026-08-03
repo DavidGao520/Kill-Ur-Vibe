@@ -27,10 +27,11 @@ proves the holes with real requests, and produces a consultant-grade report.
 - **Single egress policy engine** — the agent has *no* raw network. Every request
   (recon, probe, DNS, scan) is checked against the authorized scope at call time. An
   out-of-scope host or off-scope redirect is refused, not followed.
-- **Read-only by default.** Writes go through a gated tool, authorized *per action
-  class* (account-create / object-PUT / websocket-save / …). The first write of each
-  class against a live target needs operator confirmation; synthetic records only,
-  never destructive.
+- **Writes are synthetic, gated, and consented.** The default run enables the
+  synthetic-write classes (account-create / object-PUT / websocket-save) for depth — but
+  only *after* a mandatory per-run authorization confirmation, and every write is gated
+  *per action class*, creates clearly-tagged synthetic records, and is never destructive.
+  Type `READ-ONLY` at the prompt to run purely read-only.
 - **No secret or PII values in reports.** Findings record presence / type / count /
   length only; a redaction pass scrubs the output.
 - **Bounded.** Hard caps on tool calls, wall-clock, and spend per run.
@@ -86,21 +87,23 @@ It writes a polished HTML report to `runs/` (open it, Cmd-P → Save as PDF).
 
 ## What the agent can do
 
-Thirteen gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
+Fourteen gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
 `decode_jwt_role`, `classify_secret`, `check_source_map`, `scan_js` (full-bundle secret
 scan), `enumerate_subdomains` (DNS + dangling-CNAME takeover detection), `check_email_auth`
-(SPF / DMARC), `probe_websocket` (unauthenticated websocket read/write probe with a
+(SPF / DMARC), `discover_paths` (route/endpoint discovery from the page + JS bundles, with an
+optional path wordlist), `probe_websocket` (unauthenticated websocket read/write probe with a
 values-free field summary), `check_http_posture` (deterministic CSP / cookie / CORS / HSTS
 gap analysis), `analyze_oauth` (authorize-URL `state` / PKCE / `hd` analysis), and
 `check_tls` (certificate validity / expiry / hostname / protocol).
 
-Read-only by default. An **opt-in synthetic-write tier** (self-registration, object-PUT,
-websocket-save) can be enabled per run — off unless you explicitly ask for it — to prove
-write paths with clearly-tagged synthetic records, never destructive, still per-class gated.
+The **synthetic-write tier** (self-registration, object-PUT, websocket-save) is ON by
+default to prove write paths — clearly-tagged synthetic records, never destructive, still
+per-class gated, and only after the per-run authorization confirmation. Type `READ-ONLY`
+at the prompt to run purely read-only.
 
 ## Status
 
-Thin core is built and unit-tested (125 tests): egress policy engine + authorization
+Thin core is built and unit-tested (146 tests): egress policy engine + authorization
 scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
 scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, and the report
 generator. **Deferred:** a headless browser for JS-heavy SPAs.

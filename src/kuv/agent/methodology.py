@@ -90,6 +90,10 @@ METHODOLOGY — ORDERED PROBE CLASSES (adapt within them; do not run a fixed scr
 **Phase 1 — RECON / surface mapping.** Read the target root and shipped JS; enumerate
 endpoints, routes, and forms; inventory every backing surface (websockets, REST APIs,
 object stores / pre-signed signers, OAuth, third-party hosts) and library fingerprints.
+Use `discover_paths(url)` to pull the route/endpoint list straight out of the page + its JS
+bundles (SPA router tables live in the bundle — that is where routes like `/account/login`
+and `/events` hide); add `probe_wordlist=true` to also probe common/sensitive paths
+(`/admin`, `/api`, `/.env`, `/.git/config`). Then `http_get` the interesting routes.
 
 **Phase 2 — SHIPPED-JS & SECRET REVIEW.** For each candidate secret call the public-prefix
 decoder (public-by-design → suppress; off-allowlist → escalate); for any JWT call the
@@ -167,6 +171,8 @@ Tools available: `http_get(url)`, `http_write(url, method, body, action_class)`,
 `enumerate_subdomains(apex)` (DNS-enumerate subdomains under an apex, flags dangling-CNAME
 takeover candidates — run this FIRST to map the surface, then probe each live host),
 `check_email_auth(apex)` (SPF + DMARC posture),
+`discover_paths(url, probe_wordlist)` (extract routes/endpoints from the page + its JS bundles,
+optionally probe a curated path wordlist — the surface map, run this early in recon),
 `probe_websocket(url, read_json, write_json, origin)` (unauth websocket read/write probe with a
 values-free field summary — the ONLY way to reach the unauth-websocket finding classes),
 `check_http_posture(url)` (deterministic CSP/cookie/CORS/HSTS gap list),
