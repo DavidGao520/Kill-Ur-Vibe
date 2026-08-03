@@ -118,13 +118,15 @@ def _ask(prompt: str) -> str:
 def main() -> int:
     print(BANNER)
 
-    # 1) Anthropic key — hidden input, memory only.
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        if _ask("Use the ANTHROPIC_API_KEY already in your environment? [Y/n] ").lower() in ("", "y", "yes"):
-            pass
-        else:
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    # 1) Auth — your Claude subscription (claude.ai login) or a pay-per-token API key.
+    print("How do you want to pay for the model?")
+    print("  [1] Claude subscription — use your claude.ai login (Pro/Max), no API fees")
+    print("  [2] Anthropic API key — pay per token")
+    use_subscription = (_ask("Choose [1/2] (default 1): ") or "1").strip() != "2"
+    if use_subscription:
+        os.environ.pop("ANTHROPIC_API_KEY", None)   # unset so the SDK uses your claude.ai login
+        print("→ Using your claude.ai login (be logged in via Claude Code / `claude` first).")
+    else:
         key = getpass.getpass("Paste your Anthropic API key (input hidden, never saved): ").strip()
         if not key:
             print("No key provided.")
@@ -152,8 +154,9 @@ def main() -> int:
     scope = build_scope(host, apex, who)
     budget = RunBudget(max_requests=100, max_wall_seconds=600.0)
 
-    print(f"\nAssessing {url} … (a few minutes; uses your Anthropic key; capped at "
-          f"{budget.max_requests} calls / ${2.0:.0f})")
+    pay = "your Claude subscription (no API fees)" if use_subscription else "your Anthropic key (≤ $2)"
+    print(f"\nAssessing {url} … (a few minutes; {pay}; capped at "
+          f"{budget.max_requests} calls / {int(budget.max_wall_seconds // 60)} min)")
     result = asyncio.run(run_assessment(scope, url, now=date.today, budget=budget))
 
     # 4) Report → PDF on the Desktop.
@@ -176,7 +179,9 @@ def main() -> int:
     crit = sum(1 for f in result.findings if f.severity().value == "Critical")
     print("\n" + "─" * 56)
     print(f"Done. {len(result.findings)} finding(s){f' · {crit} Critical' if crit else ''}.")
-    if result.cost_usd is not None:
+    if use_subscription:
+        print("Billed to your Claude subscription (no API charge).")
+    elif result.cost_usd is not None:
         print(f"Cost: ${result.cost_usd:.2f}")
     if made_pdf:
         print(f"PDF report on your Desktop: {pdf_path}")
