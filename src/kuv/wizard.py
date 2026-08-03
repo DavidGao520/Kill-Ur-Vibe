@@ -165,29 +165,33 @@ def main() -> int:
         print(f"  {exc}")
         return 1
 
-    # 4) Authorization confirmation — the load-bearing gate.
+    # 4) Authorization confirmation — the load-bearing gate. This is the ONE consent
+    #    that gates the whole run (read AND write); it must stay mandatory.
     print(
         f"\n⚠  kuv will actively security-test  {host}  (and *.{apex}).\n"
-        f"   It sends real requests. This run is READ-ONLY (it never changes your data).\n"
-        f"   Only proceed if you OWN this site or have written permission to test it."
+        f"   It sends real requests and — with write probes ON by default — may CREATE\n"
+        f"   clearly-tagged synthetic records (never destructive; you can switch to read-only\n"
+        f"   in the next step).\n"
+        f"   Only proceed if you OWN this site or have written permission to test AND change it."
     )
     if _ask("   Type 'yes' to confirm you are authorized: ").lower() != "yes":
         print("Not confirmed — nothing was run.")
         return 1
 
-    # 4b) Optional synthetic-WRITE tier (default OFF). Reproduces the open-registration
-    #     and public-upload finding classes by CREATING clearly-tagged synthetic records.
-    #     Off keeps the run purely read-only; on still gates every write per action class.
-    allow_writes = False
+    # 4b) Synthetic-WRITE tier — ON by default (breadth + depth: reproduces the
+    #     open-registration / public-upload / websocket read-write finding classes by
+    #     CREATING clearly-tagged synthetic records). Never destructive; each class still
+    #     per-gated by the egress engine; fires only after the authorization above. Opt OUT
+    #     with 'READ-ONLY'. INVITE_FLOW stays excluded (it would email a third party).
     print(
-        "\n   Optional: enable synthetic WRITE probes (self-registration, file-upload,\n"
-        "   websocket-save)? These CREATE clearly-tagged synthetic records to prove a write\n"
-        "   path — never destructive — but a write can trigger real side effects (a welcome\n"
-        "   email, a webhook, a Stripe customer). Leave OFF for a pure read-only assessment."
+        "\n   Synthetic WRITE probes are ON (self-registration, file-upload, websocket-save):\n"
+        "   they CREATE clearly-tagged synthetic records to prove write paths — never\n"
+        "   destructive — but a write can trigger real side effects (a welcome email, a\n"
+        "   webhook, a Stripe customer)."
     )
-    if _ask("   Enable synthetic writes? Type 'ENABLE-WRITES' (or press Enter to skip): ") == "ENABLE-WRITES":
-        allow_writes = True
-        print("   → Synthetic writes ENABLED (tagged records only; each still per-class gated).")
+    allow_writes = _ask("   Press Enter to keep writes ON, or type 'READ-ONLY' to disable: ").strip().upper() != "READ-ONLY"
+    print("   → " + ("Synthetic writes ON (tagged records only; each still per-class gated)."
+                     if allow_writes else "Read-only — no writes will be made."))
 
     who = _ask("   Your name or email (for the report header, optional): ") or "operator"
     scope = build_scope(host, apex, who, allow_writes=allow_writes)
