@@ -44,20 +44,20 @@ _CSS = """
 body{margin:0;background:#5b6472;font-family:-apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;
   color:var(--ink);-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .page{background:#fff;width:820px;margin:22px auto;padding:52px 60px;position:relative;min-height:1040px}
-.cover{background:var(--navy);color:#fff;padding:0;overflow:hidden}
-.cover .topbar{height:12px;background:var(--teal);width:86%}
+.cover{background:var(--navy);color:#fff;padding:0;overflow:hidden;display:flex;flex-direction:column}
+.cover .topbar{height:12px;background:var(--teal);width:62%;flex:none;margin:58px 0 0 60px}
 .cover .rightcol{position:absolute;top:0;right:0;width:88px;height:100%;background:var(--blue)}
 .cover .rightcol:before{content:"";position:absolute;left:-6px;top:0;width:6px;height:100%;background:var(--teal)}
-.cover .inner{padding:0 60px}
-.cover h1{font-size:44px;line-height:1.08;font-weight:600;margin:300px 0 14px;letter-spacing:-.5px}
-.cover .sub{color:#a9c3d6;font-size:19px;margin-bottom:54px}
+.cover .inner{padding:0 60px;flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;min-height:0}
+.cover h1{font-size:44px;line-height:1.08;font-weight:600;margin:0 0 14px;letter-spacing:-.5px}
+.cover .sub{color:#a9c3d6;font-size:19px;margin-bottom:40px}
 .cover .lbl{font-weight:700;font-size:15px;margin:0 0 8px}
 .cover .core{color:#c7d6e2;font-size:15px;line-height:1.55;max-width:520px;margin:0 0 26px}
-.cover .tiles{display:flex;gap:14px;margin-bottom:90px}
+.cover .tiles{display:flex;gap:14px;margin-bottom:0}
 .cover .tile{background:var(--navy2);border-radius:6px;padding:18px 22px;min-width:130px;display:flex;align-items:baseline;gap:10px}
 .cover .tile b{font-size:34px;font-weight:600}
 .cover .tile span{color:#c7d6e2;font-size:14px}
-.cover .band{background:#0f2740;padding:40px 60px 70px;margin-top:40px}
+.cover .band{background:#0f2740;padding:34px 60px 52px;flex:none}
 .cover .band b{display:block;font-weight:700;margin-bottom:8px}
 .cover .band div{color:#b9cad8;font-size:14px;line-height:1.7}
 .cover .conf{position:absolute;right:14px;bottom:26px;color:#cdd8ff;font-size:13px}
@@ -111,7 +111,8 @@ code{background:#eef0f3;color:#324;padding:1px 5px;border-radius:3px;
 @media print{
   body{background:#fff}
   .page{width:auto;margin:0;min-height:auto;padding:40px 46px;page-break-after:always}
-  .cover{min-height:100vh}
+  .cover{height:100vh;min-height:100vh;padding:0}
+  .finding{page-break-inside:avoid}
 }
 """
 
@@ -126,6 +127,7 @@ def _e(text: object, secrets: Iterable[str]) -> str:
 
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _CODE = re.compile(r"`([^`]+)`")
+_TSEP = re.compile(r"^:?-{2,}:?$")
 
 
 def _inline(escaped: str) -> str:
@@ -133,13 +135,25 @@ def _inline(escaped: str) -> str:
     return _CODE.sub(r"<code>\1</code>", _BOLD.sub(r"<strong>\1</strong>", escaped))
 
 
+def _row_cells(line: str) -> list[str]:
+    """Cells of a `| a | b |` markdown table row (leading/trailing pipes trimmed)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
 def _md(text: object, secrets: Iterable[str]) -> str:
-    """Render the agent's markdown subset (headings, bullets, bold, code, paragraphs)
-    to clean HTML — so a summary is formatted, not dumped as literal `##`/`**`."""
+    """Render the agent's markdown subset (headings, bullets, tables, bold, code,
+    paragraphs) to clean HTML — so a summary is formatted, not dumped as literal
+    `##` / `**` / `| a | b |` pipes."""
     scrubbed = _scrub(text, secrets)
     out: list[str] = []
     para: list[str] = []
     items: list[str] = []
+    rows: list[list[str]] = []
 
     def flush_para() -> None:
         if para:
@@ -151,21 +165,50 @@ def _md(text: object, secrets: Iterable[str]) -> str:
             out.append("<ul>" + "".join(f"<li>{_inline(html.escape(i))}</li>" for i in items) + "</ul>")
             items.clear()
 
+    def flush_table() -> None:
+        if not rows:
+            return
+        header: list[str] | None = None
+        body: list[list[str]] = []
+        for cells in rows:
+            if cells and all(_TSEP.match(c) for c in cells if c):
+                continue  # |---|---| separator row
+            if header is None:
+                header = cells
+            else:
+                body.append(cells)
+        rows.clear()
+        if header is None:
+            return
+        thead = "".join(f"<th>{_inline(html.escape(c))}</th>" for c in header)
+        trs = "".join(
+            "<tr>" + "".join(f"<td>{_inline(html.escape(c))}</td>" for c in cells) + "</tr>"
+            for cells in body
+        )
+        out.append(f"<table><thead><tr>{thead}</tr></thead><tbody>{trs}</tbody></table>")
+
+    def flush_all() -> None:
+        flush_para(); flush_items(); flush_table()
+
     for raw in scrubbed.split("\n"):
         line = raw.strip()
         if not line:
-            flush_para(); flush_items(); continue
+            flush_all(); continue
+        if line.startswith("|"):
+            flush_para(); flush_items()
+            rows.append(_row_cells(line))
+            continue
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading:
-            flush_para(); flush_items()
+            flush_all()
             out.append(f'<h4 class="md-h">{_inline(html.escape(heading.group(2)))}</h4>')
         elif line[:2] in ("- ", "* "):
-            flush_para()
+            flush_para(); flush_table()
             items.append(line[2:].strip())
         else:
-            flush_items()
+            flush_items(); flush_table()
             para.append(line)
-    flush_para(); flush_items()
+    flush_all()
     return "\n".join(out)
 
 
@@ -175,6 +218,15 @@ def _first_sentence(text: str, limit: int = 220) -> str:
     flat = re.sub(r"\s+", " ", flat).strip()
     cut = flat.find(". ")
     lead = flat if cut == -1 else flat[: cut + 1]
+    return (lead[:limit].rstrip() + "…") if len(lead) > limit else lead
+
+
+def _lead(text: str, max_sentences: int = 2, limit: int = 280) -> str:
+    """The first sentence or two, markdown-free — for the Decision-needed callout."""
+    flat = re.sub(r"[*`#>|]", "", str(text)).replace("\n", " ")
+    flat = re.sub(r"\s+", " ", flat).strip()
+    parts = re.split(r"(?<=[.!?])\s+", flat)
+    lead = " ".join(parts[:max_sentences]).strip()
     return (lead[:limit].rstrip() + "…") if len(lead) > limit else lead
 
 
@@ -222,6 +274,12 @@ def assemble_html_report(
             core_result = f"{parts}. Top finding: {ordered[0].title}."
         else:
             core_result = "No verified findings within the authorized scope."
+
+    # The signature "Decision needed" callout — default it from the top finding's fix
+    # (the most severe finding first) so the exec brief always leads with an action.
+    if not decision_needed and ordered and ordered[0].severity() in (Severity.CRITICAL, Severity.HIGH):
+        top = ordered[0]
+        decision_needed = _lead(top.recommendation or top.title)
 
     # ---- cover ----
     cover_tiles = "".join(
@@ -274,9 +332,9 @@ def assemble_html_report(
 <section class="page">
   {_hdr(target, prepared_for, date_str)}
   <h2 class="section">Executive Brief</h2>
-  <div class="executive">{_md(exec_brief, secrets)}</div>
   {callout}
   <div class="stats">{exec_tiles}</div>
+  <div class="executive">{_md(exec_brief, secrets)}</div>
   <div class="chart"><div class="cap">Verified issue count by severity</div>
     <div class="note">Severity assigned by the deterministic rule table, not the model.</div>
     {bars}

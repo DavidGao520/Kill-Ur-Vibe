@@ -85,6 +85,39 @@ def test_markdown_brief_is_rendered_not_literal():
     assert "## Assessment" not in html and "**Scope" not in html  # no literal markdown
 
 
+def test_markdown_table_renders_as_html_table_not_pipes():
+    md = (
+        "Proven findings:\n\n"
+        "| # | Finding | Severity |\n"
+        "| --- | --- | --- |\n"
+        "| 1 | Unauth search | Critical |\n"
+        "| 2 | Wildcard CORS | Medium |\n"
+    )
+    html = assemble_html_report(
+        _findings(), target="t", exec_brief=md, prepared_for="Acme", date_str="2026-08-03"
+    )
+    body = html.split("Executive Brief", 1)[1]
+    assert "<th>Finding</th>" in body                      # header cell rendered
+    assert "<td>Unauth search</td>" in body                # body cell rendered
+    assert "| # | Finding" not in body                     # no raw pipe row leaked
+    assert "| --- |" not in body                           # separator row consumed
+
+
+def test_decision_needed_is_derived_from_top_finding_when_absent():
+    # Caller omits decision_needed -> it defaults to the top (most severe) fix.
+    html = assemble_html_report(
+        _findings(), target="t", exec_brief="x", prepared_for="Acme", date_str="2026-08-03"
+    )
+    assert "Decision needed" in html
+    assert "Add the missing auth check" in html            # from the Critical's recommendation
+
+
+def test_no_decision_callout_when_only_low_severity():
+    low = [Finding(FindingType.OAUTH_CONFIG_GAP, "Missing state param", "GET /oauth", "no state")]
+    html = assemble_html_report(low, target="t", exec_brief="x", date_str="2026-08-03")
+    assert "Decision needed" not in html                   # Medium/Low alone -> no forced callout
+
+
 def test_cover_core_result_is_short_not_the_whole_brief():
     long_brief = "## Summary\n\nUNIQUEBRIEFTOKEN " + ("detail " * 80)
     html = assemble_html_report(
