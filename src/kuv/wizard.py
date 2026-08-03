@@ -21,8 +21,18 @@ from urllib.parse import urlparse
 
 from kuv.agent.spine import run_assessment
 from kuv.egress import RunBudget
-from kuv.gate import Scope
+from kuv.gate import ActionClass, Scope
 from kuv.report import assemble_html_report
+
+# The synthetic-write classes the opt-in tier enables (never destructive; each still
+# gated per-class, tagged synthetic records only). These EXACTLY match what the
+# ENABLE-WRITES prompt discloses — INVITE_FLOW is deliberately excluded (sending an
+# invite emails a third party, a side effect the opt-in prompt does not disclose).
+WRITE_TIER_ACTIONS = frozenset({
+    ActionClass.ACCOUNT_CREATE,
+    ActionClass.OBJECT_PUT,
+    ActionClass.WEBSOCKET_SAVE,
+})
 
 BANNER = r"""
   _  _____ _     _       _   _ ____    _   _ ___ ____  _____
@@ -48,14 +58,15 @@ def parse_target(raw: str) -> tuple[str, str, str]:
     return raw, host, apex
 
 
-def build_scope(host: str, apex: str, authorized_by: str) -> Scope:
-    """A READ-ONLY, one-year scope for an interactively-authorized target."""
+def build_scope(host: str, apex: str, authorized_by: str, allow_writes: bool = False) -> Scope:
+    """A one-year scope for an interactively-authorized target. Read-only by default;
+    `allow_writes` opts into the gated synthetic-write classes (still per-class gated)."""
     return Scope(
         engagement_id=host,
         authorized_by=authorized_by,
         targets=(host, apex, f"*.{apex}"),
         expires_at=date.today() + timedelta(days=365),
-        allowed_actions=frozenset(),      # read-only — no writes to production
+        allowed_actions=WRITE_TIER_ACTIONS if allow_writes else frozenset(),
         is_fixture=False,
         authorization_asserted=True,       # set only after the operator confirms below
     )
@@ -164,14 +175,32 @@ def main() -> int:
         print("Not confirmed — nothing was run.")
         return 1
 
+    # 4b) Optional synthetic-WRITE tier (default OFF). Reproduces the open-registration
+    #     and public-upload finding classes by CREATING clearly-tagged synthetic records.
+    #     Off keeps the run purely read-only; on still gates every write per action class.
+    allow_writes = False
+    print(
+        "\n   Optional: enable synthetic WRITE probes (self-registration, file-upload,\n"
+        "   websocket-save)? These CREATE clearly-tagged synthetic records to prove a write\n"
+        "   path — never destructive — but a write can trigger real side effects (a welcome\n"
+        "   email, a webhook, a Stripe customer). Leave OFF for a pure read-only assessment."
+    )
+    if _ask("   Enable synthetic writes? Type 'ENABLE-WRITES' (or press Enter to skip): ") == "ENABLE-WRITES":
+        allow_writes = True
+        print("   → Synthetic writes ENABLED (tagged records only; each still per-class gated).")
+
     who = _ask("   Your name or email (for the report header, optional): ") or "operator"
-    scope = build_scope(host, apex, who)
+    scope = build_scope(host, apex, who, allow_writes=allow_writes)
+    confirm_actions = WRITE_TIER_ACTIONS if allow_writes else frozenset()
     budget = RunBudget(max_requests=100, max_wall_seconds=600.0)
 
     pay = "your Claude subscription (no API fees)" if use_subscription else "your Anthropic key (≤ $2)"
-    print(f"\nAssessing {url} … (a few minutes; {model}; {pay}; capped at "
+    mode = "read-only" if not allow_writes else "read + synthetic writes"
+    print(f"\nAssessing {url} … ({mode}; a few minutes; {model}; {pay}; capped at "
           f"{budget.max_requests} calls / {int(budget.max_wall_seconds // 60)} min)")
-    result = asyncio.run(run_assessment(scope, url, now=date.today, budget=budget, model=model))
+    result = asyncio.run(run_assessment(
+        scope, url, now=date.today, budget=budget, model=model, confirm_actions=confirm_actions
+    ))
 
     # 5) Report → PDF on the Desktop.
     html = assemble_html_report(

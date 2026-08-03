@@ -17,7 +17,7 @@ import httpx
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
 
 from kuv.egress import EgressEngine, RunBudget
-from kuv.gate import Scope
+from kuv.gate import ActionClass, Scope
 from kuv.report import Finding
 
 from .methodology import METHODOLOGY_SYSTEM_PROMPT, task_prompt
@@ -73,16 +73,26 @@ async def run_assessment(
     budget: RunBudget | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
     max_budget_usd: float = DEFAULT_MAX_BUDGET_USD,
+    confirm_actions: frozenset[ActionClass] = frozenset(),
 ) -> AssessmentResult:
     """Run one autonomous assessment of `target` under `scope`.
 
     Runaway is bounded on two layers: the egress `budget` caps tool-calls / wall-clock
     / writes, and `max_turns` + `max_budget_usd` hard-cap the LLM loop and its spend at
     the SDK layer (so it cannot burn turns/tokens after the tool budget is exhausted).
+
+    `confirm_actions` records up-front operator consent for the given write classes (they
+    must ALSO be in `scope.allowed_actions`), standing in for the mid-run CONFIRM in the
+    wizard's autonomous flow. Empty by default → a pure read-only run where any write is
+    still gate-refused. The caller is responsible for having obtained explicit, disclosed
+    consent before passing anything here.
     """
     audit: list[dict] = []
     budget = budget or RunBudget()
     engine = EgressEngine(scope, now=now, audit=audit.append, budget=budget)
+    for action in confirm_actions:
+        if action in scope.allowed_actions:      # never confirm a class the scope did not allow
+            engine.confirm(action)
     async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
         session = AssessmentSession(engine, client)
         server = build_network_server(session)

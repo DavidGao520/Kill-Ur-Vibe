@@ -86,17 +86,24 @@ It writes a polished HTML report to `runs/` (open it, Cmd-P → Save as PDF).
 
 ## What the agent can do
 
-Nine gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
+Thirteen gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
 `decode_jwt_role`, `classify_secret`, `check_source_map`, `scan_js` (full-bundle secret
 scan), `enumerate_subdomains` (DNS + dangling-CNAME takeover detection), `check_email_auth`
-(SPF / DMARC).
+(SPF / DMARC), `probe_websocket` (unauthenticated websocket read/write probe with a
+values-free field summary), `check_http_posture` (deterministic CSP / cookie / CORS / HSTS
+gap analysis), `analyze_oauth` (authorize-URL `state` / PKCE / `hd` analysis), and
+`check_tls` (certificate validity / expiry / hostname / protocol).
+
+Read-only by default. An **opt-in synthetic-write tier** (self-registration, object-PUT,
+websocket-save) can be enabled per run — off unless you explicitly ask for it — to prove
+write paths with clearly-tagged synthetic records, never destructive, still per-class gated.
 
 ## Status
 
-Thin core is built and unit-tested (94 tests): egress policy engine + authorization
+Thin core is built and unit-tested (125 tests): egress policy engine + authorization
 scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
-scanner, DNS recon, and the report generator. **Deferred:** TLS validation and a headless
-browser for JS-heavy SPAs.
+scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, and the report
+generator. **Deferred:** a headless browser for JS-heavy SPAs.
 
 ## Stack
 

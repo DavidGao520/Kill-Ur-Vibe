@@ -1,4 +1,4 @@
-"""The deterministic severity rule table.
+"""The deterministic severity rule table (DESIGN-active-cli.md §Severity, D9).
 
 `severity_for` maps a finding TYPE (plus context for the one conditional rule) to
 a fixed severity. A finding type not in the table raises ``NeedsOperatorSeverity``
@@ -26,6 +26,9 @@ class FindingType(str, Enum):
     ABUSABLE_PRESIGNED_UPLOAD = "abusable_presigned_upload"
     WEAK_TRANSPORT_OR_CORS = "weak_transport_or_cors"    # missing HSTS/CSP, ACAO:*
     OAUTH_CONFIG_GAP = "oauth_config_gap"                # missing state/PKCE
+    INSECURE_TLS = "insecure_tls"                        # expired/self-signed/mismatch/obsolete
+    SUBDOMAIN_TAKEOVER = "subdomain_takeover"            # dangling CNAME to a claimable service
+    EMAIL_SPOOFING = "email_spoofing"                    # DMARC p=none / unset
 
 
 class NeedsOperatorSeverity(Exception):
@@ -46,6 +49,13 @@ _STATIC: dict[FindingType, Severity] = {
     FindingType.ABUSABLE_PRESIGNED_UPLOAD: Severity.HIGH,
     FindingType.WEAK_TRANSPORT_OR_CORS: Severity.MEDIUM,
     FindingType.OAUTH_CONFIG_GAP: Severity.MEDIUM,
+    # A broken cert on a production host (expired / self-signed / hostname-mismatch /
+    # obsolete protocol) is an active MITM exposure, not cosmetic → High.
+    FindingType.INSECURE_TLS: Severity.HIGH,
+    # A claimable dangling subdomain lets an attacker serve content from your domain.
+    FindingType.SUBDOMAIN_TAKEOVER: Severity.HIGH,
+    # Unenforced DMARC lets anyone spoof your domain in email — real but indirect.
+    FindingType.EMAIL_SPOOFING: Severity.MEDIUM,
 }
 
 # Priority bucket = impact-over-effort ordering, keyed off the assigned severity.

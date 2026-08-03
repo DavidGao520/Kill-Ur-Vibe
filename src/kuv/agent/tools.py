@@ -29,6 +29,10 @@ TOOL_NAMES = (
     "mcp__kuvnet__scan_js",
     "mcp__kuvnet__enumerate_subdomains",
     "mcp__kuvnet__check_email_auth",
+    "mcp__kuvnet__probe_websocket",
+    "mcp__kuvnet__check_http_posture",
+    "mcp__kuvnet__analyze_oauth",
+    "mcp__kuvnet__check_tls",
 )
 
 
@@ -136,6 +140,59 @@ def build_network_server(session: AssessmentSession):
     async def check_email_auth_tool(args):
         return _wrap(session.check_email_auth(args["apex"]))
 
+    @tool(
+        "probe_websocket",
+        "Probe an in-scope websocket (ws://|wss://) with NO cookie/token. The unauth "
+        "handshake is passive; sending ANY frame is an active interaction, so BOTH "
+        "`read_json` (subscribe) and `write_json` (synthetic save) route through the write "
+        "gate as action_class=websocket_save and are sent ONLY when that class is enabled "
+        "(`frames_result` reports which). `origin` sets an Origin header to test cross-origin "
+        "acceptance. The connection is pinned to the given host (cross-origin handshake "
+        "redirects are refused). Returns handshake status, whether it connected "
+        "unauthenticated, and a field summary (name/count/non-empty/max-len ONLY — never "
+        "values). This proves the unauth-websocket read/write and sensitive-field-leak classes.",
+        {"url": str, "read_json": str, "write_json": str, "origin": str},
+    )
+    async def probe_websocket_tool(args):
+        return _wrap(await session.probe_websocket(
+            args["url"], args.get("read_json", ""), args.get("write_json", ""),
+            args.get("origin") or None,
+        ))
+
+    @tool(
+        "check_http_posture",
+        "GET an in-scope URL and deterministically analyze its security posture: CSP "
+        "(unsafe-inline/eval, leftover localhost dev origins), Set-Cookie flags "
+        "(Secure/SameSite/HttpOnly), CORS (ACAO:* / Allow-Credentials), HSTS, and the "
+        "security-header set. Returns a concrete `gaps` list — file weak_transport_or_cors "
+        "findings from it instead of eyeballing raw headers.",
+        {"url": str},
+    )
+    async def check_http_posture_tool(args):
+        return _wrap(await session.check_http_posture(args["url"]))
+
+    @tool(
+        "analyze_oauth",
+        "Deterministically analyze an OAuth authorize URL you already found in a fetched "
+        "page (e.g. a Google/Microsoft/GitHub login link). Reports response_type and whether "
+        "`state` (CSRF), `code_challenge` (PKCE), `nonce`, and Google `hd` are present, plus "
+        "a `gaps` list. File oauth_config_gap findings from it — do not eyeball the URL.",
+        {"authorize_url": str},
+    )
+    async def analyze_oauth_tool(args):
+        return _wrap(session.analyze_oauth(args["authorize_url"]))
+
+    @tool(
+        "check_tls",
+        "Validate an in-scope host's TLS certificate: chain validity, expiry, hostname "
+        "match, and negotiated protocol version. Returns a `gaps` list (expired / "
+        "self-signed / hostname-mismatch / obsolete-protocol). File insecure_tls findings "
+        "from it. Pass a bare host (e.g. 'app.example.com').",
+        {"host": str},
+    )
+    async def check_tls_tool(args):
+        return _wrap(session.check_tls(args["host"]))
+
     return create_sdk_mcp_server(
         SERVER_NAME,
         "0.1.0",
@@ -149,5 +206,9 @@ def build_network_server(session: AssessmentSession):
             scan_js_tool,
             enumerate_subdomains_tool,
             check_email_auth_tool,
+            probe_websocket_tool,
+            check_http_posture_tool,
+            analyze_oauth_tool,
+            check_tls_tool,
         ],
     )

@@ -100,17 +100,26 @@ decoder. Never eyeball these — call the deterministic tools.
 Reasoning, not a scan:
   • **Unauth data APIs** — hit `GET` search/list endpoints with NO credentials; if one
     returns data, enumerate its siblings by the API's own shape; check for `ACAO: *`.
-  • **Websocket** — connect with NO cookie/token; if the handshake succeeds, send a read
-    message with a client-chosen id; if it returns data, escalate to a synthetic write.
+  • **Websocket** — use `probe_websocket(url)` with NO cookie/token. The unauth handshake
+    is the passive test (`connected_no_auth=true`, with an untrusted `origin`, already shows
+    an anonymous cross-origin client is accepted). Any application frame is active: BOTH
+    `read_json` (subscribe) and `write_json` (save) route through the write gate as
+    `websocket_save` and are sent only when that class is enabled. When sent, a `field_summary`
+    proves an unauth read (`unauth_read_sensitive`; if `sensitive_fields` is non-empty set
+    `contains_pii_or_secrets=true` → Critical) and a round-tripping `write_json` is `unauth_write`.
   • **Registration / auth** — is the visible gate (invite code) real, or frontend-only?
     Test the direct API the frontend calls with no invite code. If a synthetic account is
     created, use it to see what it reads and writes. Check cookie flags.
   • **File upload / object store** — request a pre-signed PUT; PUT a synthetic object; GET
     it back to confirm public readability; test path traversal and MIME acceptance.
 
-**Phase 4 — TRANSPORT / CORS / OAUTH POSTURE.** CORS (`ACAO: *`, preflight), cookie flags,
-CSP (`unsafe-inline`/`unsafe-eval`, leftover dev origins), HSTS, HTTP→HTTPS. OAuth authorize
-URL for `state`/PKCE. Record good posture as positive controls.
+**Phase 4 — TRANSPORT / CORS / OAUTH / TLS POSTURE (use the deterministic tools).** Call
+`check_http_posture(url)` on each host — it returns a concrete `gaps` list (CORS `ACAO:*`,
+cookie flags, CSP `unsafe-inline`/`unsafe-eval`/dev origins, HSTS); file `weak_transport_or_cors`
+from it. For an OAuth login link call `analyze_oauth(authorize_url)` → `oauth_config_gap` from its
+gaps (missing `state`/PKCE/`hd`). Call `check_tls(host)`; a non-empty `gaps` list (expired /
+self-signed / hostname-mismatch / obsolete protocol) is an `insecure_tls` finding. Record clean
+posture as positive controls.
 
 **Phase 5 — DECODE & VALIDATE.** Every active finding must have been reproduced by a
 deterministic probe. No exploit, no report.
@@ -157,12 +166,17 @@ Tools available: `http_get(url)`, `http_write(url, method, body, action_class)`,
 `scan_js(url)` (fetch a bundle in full and scan it for secrets — use on EVERY shipped bundle),
 `enumerate_subdomains(apex)` (DNS-enumerate subdomains under an apex, flags dangling-CNAME
 takeover candidates — run this FIRST to map the surface, then probe each live host),
-`check_email_auth(apex)` (SPF + DMARC posture).
+`check_email_auth(apex)` (SPF + DMARC posture),
+`probe_websocket(url, read_json, write_json, origin)` (unauth websocket read/write probe with a
+values-free field summary — the ONLY way to reach the unauth-websocket finding classes),
+`check_http_posture(url)` (deterministic CSP/cookie/CORS/HSTS gap list),
+`analyze_oauth(authorize_url)` (deterministic OAuth state/PKCE/hd gap list),
+`check_tls(host)` (deterministic cert validity/expiry/hostname/protocol gap list).
 
 Breadth checklist — do NOT stop at the first host:
 1. `enumerate_subdomains(apex)` → probe EACH live host it returns. A `dangling=true` result
-   is a subdomain-takeover finding on its own.
-2. `check_email_auth(apex)` → DMARC `p=none`/absent is an email-spoofing finding.
+   is a `subdomain_takeover` finding on its own.
+2. `check_email_auth(apex)` → DMARC `p=none`/absent is an `email_spoofing` finding.
 3. `scan_js(url)` on every shipped bundle → report `secret exposed` findings by type/count/length.
 4. Posture on every host: full security-header set (HSTS, CSP, X-Content-Type-Options,
    Referrer-Policy, Permissions-Policy, X-Frame-Options), SRI on third-party scripts,

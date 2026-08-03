@@ -11,6 +11,8 @@ import json
 from typing import Any, Protocol
 
 from kuv.decoders import (
+    analyze_http_posture,
+    analyze_oauth_url,
     check_source_map_exposed,
     classify_secret_prefix,
     decode_jwt_role,
@@ -26,6 +28,8 @@ from kuv.recon.dns import (
     takeover_suffix,
 )
 from kuv.recon.dns import enumerate_subdomains as _dns_enumerate
+from kuv.recon.tls import TlsProbe, ssl_tls_probe
+from kuv.recon.websocket import WsProbe, flags_sensitive, summarize_fields, websockets_probe
 from kuv.report import Finding
 from kuv.scanners import scan_secrets
 from kuv.severity import FindingType
@@ -54,6 +58,33 @@ def parse_evidence_rows(raw: str) -> tuple[tuple[str, str], ...]:
     return tuple(rows)
 
 
+def _host_of(url_or_host: str) -> str:
+    """Hostname from a URL (any scheme incl. ws/wss) or a bare host string."""
+    from urllib.parse import urlparse
+
+    raw = (url_or_host or "").strip()
+    if "://" in raw:
+        return (urlparse(raw).hostname or "").lower()
+    # bare host, possibly host:port/path
+    return raw.split("/")[0].split(":")[0].lower()
+
+
+def _set_cookie_list(headers: Any) -> list[str]:
+    """All Set-Cookie header values (HTTP allows several). httpx exposes `get_list`;
+    a plain-dict fake collapses to at most one — tolerate both."""
+    getter = getattr(headers, "get_list", None)
+    if callable(getter):
+        try:
+            return list(getter("set-cookie"))
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        one = headers.get("set-cookie") if hasattr(headers, "get") else dict(headers).get("set-cookie")
+    except Exception:  # noqa: BLE001
+        one = None
+    return [one] if one else []
+
+
 class _Response(Protocol):
     status_code: int
     text: str
@@ -71,10 +102,14 @@ class AssessmentSession:
         engine: EgressEngine,
         client: _AsyncClient,
         resolver: Resolver | None = None,
+        ws_probe: WsProbe | None = None,
+        tls_probe: TlsProbe | None = None,
     ) -> None:
         self.engine = engine
         self.client = client
         self.resolver: Resolver = resolver or dnspython_resolver
+        self.ws_probe: WsProbe = ws_probe or websockets_probe
+        self.tls_probe: TlsProbe = tls_probe or ssl_tls_probe
         self.findings: list[Finding] = []
 
     async def http_request(
@@ -215,3 +250,129 @@ class AssessmentSession:
         if not allowed:
             return {"ok": False, "error": f"REFUSED: {reason}"}
         return {"ok": True, "apex": apex, **email_auth(apex, self.resolver)}
+
+    def analyze_oauth(self, authorize_url: str) -> dict:
+        """Deterministically analyze an OAuth authorize URL the agent already found in
+        a fetched page — no I/O, so no gate (nothing leaves the process)."""
+        cfg = analyze_oauth_url(authorize_url)
+        return {
+            "ok": True,
+            "is_oauth": cfg.is_oauth,
+            "provider": cfg.provider,
+            "response_type": cfg.response_type,
+            "has_state": cfg.has_state,
+            "has_pkce": cfg.has_pkce,
+            "has_nonce": cfg.has_nonce,
+            "hosted_domain": cfg.hosted_domain,
+            "redirect_host": cfg.redirect_host,
+            "scopes": list(cfg.scopes),
+            "gaps": list(cfg.gaps),
+        }
+
+    async def check_http_posture(self, url: str) -> dict:
+        """Gated GET, then a deterministic parse of the response's security posture
+        (CSP / cookies / CORS / transport headers) into a concrete gap list."""
+        verdict = self.engine.evaluate(EgressRequest("GET", url))
+        if verdict.decision is not Decision.ALLOW:
+            return {"ok": False, "error": f"REFUSED: {verdict.reason}"}
+        try:
+            resp = await self.client.get(url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"request error: {exc}"}
+        set_cookies = _set_cookie_list(resp.headers)
+        posture = analyze_http_posture(resp.status_code, dict(resp.headers), set_cookies)
+        return {
+            "ok": True,
+            "url": url,
+            "status": resp.status_code,
+            "hsts": posture.hsts,
+            "csp_present": posture.csp_present,
+            "csp_unsafe_inline": posture.csp_unsafe_inline,
+            "csp_unsafe_eval": posture.csp_unsafe_eval,
+            "csp_dev_origins": list(posture.csp_dev_origins),
+            "cors_acao": posture.cors_acao,
+            "cors_wildcard": posture.cors_wildcard,
+            "cors_allow_credentials": posture.cors_allow_credentials,
+            "cookies": [
+                {"name": c.name, "secure": c.secure, "httponly": c.httponly, "samesite": c.samesite}
+                for c in posture.cookies
+            ],
+            "gaps": list(posture.gaps),
+        }
+
+    async def probe_websocket(
+        self,
+        url: str,
+        read_json: str = "",
+        write_json: str = "",
+        origin: str | None = None,
+    ) -> dict:
+        """Unauthenticated websocket probe. The unauth HANDSHAKE is a passive read,
+        scope/budget-gated via check_host. Sending ANY application frame — a subscribe
+        (`read_json`) OR a save (`write_json`) — is treated as an active interaction: the
+        server may process any frame as a mutation, and the parameter name is not a
+        security classification. So every frame goes through the FULL write gate
+        (action_class=websocket_save); in a read-only run nothing is sent and only the
+        handshake/Origin result is reported. The field summary is presence/count/length
+        only — never a value (guardrail #4)."""
+        host = _host_of(url)
+        allowed, reason = self.engine.check_host(host, kind="websocket")
+        if not allowed:
+            return {"ok": False, "error": f"REFUSED: {reason}"}
+
+        frames: list[str] = [m for m in (read_json, write_json) if m]
+        frames_note: str | None = None
+        if frames:
+            # Every outbound frame is gated as a write — the read/write parameter name is
+            # NOT trusted to classify it (a "subscribe" can be a server-side mutation).
+            wv = self.engine.evaluate(
+                EgressRequest("POST", url, action_class=ActionClass.WEBSOCKET_SAVE)
+            )
+            if wv.decision is Decision.ALLOW:
+                frames_note = f"{len(frames)} frame(s) sent (synthetic, gate-allowed)"
+            else:
+                frames = []          # withhold ALL frames — connection/Origin test only
+                frames_note = (
+                    f"frames withheld ({wv.decision.value}: {wv.reason}) — enable the "
+                    f"websocket_save write class to send subscribe/save frames"
+                )
+
+        frame = await self.ws_probe(
+            url, origin=origin, send=tuple(frames), recv_timeout=5.0, max_messages=8
+        )
+        summary = summarize_fields(frame.messages)
+        return {
+            "ok": True,
+            "url": url,
+            "connected_no_auth": frame.connected,
+            "handshake_status": frame.handshake_status,
+            "origin_sent": frame.origin_sent,
+            "origin_accepted": (frame.connected and origin is not None),
+            "messages_received": len(frame.messages),
+            "field_summary": summary,
+            "sensitive_fields": flags_sensitive(summary),
+            "frames_result": frames_note,
+            "error": frame.error,
+        }
+
+    def check_tls(self, host: str) -> dict:
+        """Validate a host's TLS certificate (validity / expiry / hostname / protocol).
+        The handshake is scope/budget-gated via check_host."""
+        host = _host_of(host) or host
+        allowed, reason = self.engine.check_host(host, kind="tls")
+        if not allowed:
+            return {"ok": False, "error": f"REFUSED: {reason}"}
+        result = self.tls_probe(host, port=443, timeout=8.0)
+        return {
+            "ok": True,
+            "host": host,
+            "reachable": result.reachable,
+            "valid_chain": result.valid_chain,
+            "hostname_match": result.hostname_match,
+            "expired": result.expired,
+            "self_signed": result.self_signed,
+            "days_to_expiry": result.days_to_expiry,
+            "protocol": result.protocol,
+            "issuer": result.issuer,
+            "gaps": list(result.gaps),
+        }
