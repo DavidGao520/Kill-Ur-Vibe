@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+
+# Secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Deps / build
+node_modules/
+dist/
+build/
+
+# Assessment artifacts — never commit real target scopes or findings
+runs/
+scope/*.yaml
+*.findings.json
