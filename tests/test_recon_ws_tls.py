@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kuv.recon.tls import verdict_gaps
+from kuv.recon.tls import _verifying_context, verdict_gaps
 from kuv.recon.websocket import flags_sensitive, summarize_fields
 
 
@@ -97,3 +97,13 @@ def test_tls_clean_cert_has_no_gaps():
     gaps = verdict_gaps(reachable=True, valid_chain=True, hostname_match=True,
                         expired=False, self_signed=False, protocol="TLSv1.3")
     assert gaps == ()
+
+
+def test_verifying_context_has_a_real_trust_store():
+    # Regression: on a python.org build the default SSL context can have 0 CA roots,
+    # which made check_tls false-positive `insecure_tls` on EVERY site. The verifying
+    # context must end up with a real trust store (falling back to certifi), so cert
+    # validity is actually assessable rather than universally "failed".
+    ctx, has_trust = _verifying_context()
+    assert has_trust is True
+    assert ctx.cert_store_stats().get("x509_ca", 0) > 0

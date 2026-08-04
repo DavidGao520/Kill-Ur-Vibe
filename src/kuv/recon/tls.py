@@ -80,6 +80,31 @@ def _days_to_expiry(cert: dict) -> int | None:
         return None
 
 
+def _verifying_context():
+    """A verifying TLS context with a REAL trust store, plus whether one was loaded.
+
+    The stdlib default context can be EMPTY on some Python builds (e.g. a python.org
+    macOS install where 'Install Certificates.command' was never run) — 0 CA roots make
+    EVERY cert fail to verify, a systemic false positive that would flag every site as
+    `insecure_tls`. So if the default store is empty we fall back to certifi (which httpx
+    already relies on). Returns (ctx, has_trust_store); has_trust_store is False only when
+    NO roots could be loaded at all, in which case chain validity is simply not assessable.
+    """
+    import ssl
+
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats().get("x509_ca", 0) == 0:
+        try:
+            import certifi
+
+            ctx.load_verify_locations(certifi.where())
+        except Exception:  # noqa: BLE001 — certifi absent; trust store stays empty
+            pass
+    has_trust = ctx.cert_store_stats().get("x509_ca", 0) > 0
+    _lower_minimum_version(ctx)
+    return ctx, has_trust
+
+
 def _lower_minimum_version(ctx) -> None:
     """Allow legacy TLS versions to be negotiated so ss.version() can actually REPORT
     an obsolete protocol (a default context floors at 1.2, hiding 1.0/1.1)."""
@@ -121,11 +146,22 @@ def ssl_tls_probe(host: str, *, port: int = 443, timeout: float = 8.0) -> TlsRes
     days_to_expiry: int | None = None
     protocol: str | None = None
 
+    ctx, has_trust = _verifying_context()
+    if not has_trust:
+        # No CA roots anywhere → chain validity is NOT assessable in this environment.
+        # Do NOT false-positive `insecure_tls`; report reachability + protocol only.
+        proto = _negotiated_protocol(host, port, timeout)
+        return TlsResult(
+            reachable=proto is not None, valid_chain=True, hostname_match=True,
+            expired=False, self_signed=False, days_to_expiry=None, protocol=proto,
+            issuer=None,
+            gaps=verdict_gaps(reachable=proto is not None, valid_chain=True,
+                              hostname_match=True, expired=False, self_signed=False,
+                              protocol=proto),
+        )
     try:
         # Verify the cert/hostname while ALLOWING legacy protocols, so an old TLS version
         # is not misreported as a cert-chain failure — protocol is judged separately.
-        ctx = ssl.create_default_context()
-        _lower_minimum_version(ctx)
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ss:
                 protocol = ss.version()
