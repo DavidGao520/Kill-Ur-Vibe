@@ -34,6 +34,7 @@ TOOL_NAMES = (
     "mcp__kuvnet__analyze_oauth",
     "mcp__kuvnet__check_tls",
     "mcp__kuvnet__discover_paths",
+    "mcp__kuvnet__probe_api_unauth",
     "mcp__kuvnet__render_page",
 )
 
@@ -55,18 +56,25 @@ def _wrap(result: dict) -> dict:
 def build_network_server(session: AssessmentSession):
     """Build the in-process MCP server exposing the six gated tools."""
 
-    @tool("http_get", "HTTP GET an in-scope URL (passive read). Returns status, headers, body.", {"url": str})
+    @tool(
+        "http_get",
+        "HTTP GET an in-scope URL (passive read). Returns status, headers, body. Optional "
+        "`headers` may carry a session token for authenticated flows — only Authorization/"
+        "Cookie/Accept are honored; Host/proxy/framing headers are dropped.",
+        {"url": str, "headers": dict},
+    )
     async def http_get(args):
-        return _wrap(await session.http_request("GET", args["url"]))
+        return _wrap(await session.http_request("GET", args["url"], headers=args.get("headers")))
 
     @tool(
         "http_write",
-        f"Synthetic HTTP write (POST/PUT/PATCH/DELETE) to an in-scope URL. "
-        f"action_class must be one of: {_ACTIONS}. `content_type` sets the request's "
-        f"Content-Type (default application/json) — REQUIRED for most JSON write APIs, which "
-        f"return 415 or fail to parse the body without it; use e.g. "
-        f"'application/x-www-form-urlencoded' or 'image/png' when appropriate.",
-        {"url": str, "method": str, "body": str, "action_class": str, "content_type": str},
+        f"Synthetic HTTP write (POST/PUT only — DELETE/PATCH are refused; kuv is non-destructive) "
+        f"to an in-scope URL. action_class must be one of: {_ACTIONS}. `content_type` sets the "
+        f"request's Content-Type (default application/json) — REQUIRED for most JSON write APIs, "
+        f"which return 415 or fail to parse the body without it; use e.g. "
+        f"'application/x-www-form-urlencoded' or 'image/png' when appropriate. Optional `headers` "
+        f"may carry a session token (only Authorization/Cookie/Accept honored).",
+        {"url": str, "method": str, "body": str, "action_class": str, "content_type": str, "headers": dict},
     )
     async def http_write(args):
         try:
@@ -75,7 +83,7 @@ def build_network_server(session: AssessmentSession):
             return _err(f"unknown action_class {args['action_class']!r}; one of: {_ACTIONS}")
         return _wrap(await session.http_request(
             args["method"], args["url"], args.get("body"), action,
-            args.get("content_type") or "application/json",
+            args.get("content_type") or "application/json", headers=args.get("headers"),
         ))
 
     @tool(
@@ -228,6 +236,23 @@ def build_network_server(session: AssessmentSession):
         ))
 
     @tool(
+        "probe_api_unauth",
+        "Deterministically UNAUTHENTICATED-probe every API endpoint on an in-scope host — "
+        "the way to catch an unguarded data route (e.g. a /v1/search that ignores the auth "
+        "the REST routes enforce) that ad-hoc probing skips. Discovers paths (page + JS "
+        "bundles), then GETs each /v1|/api|/graphql route with NO auth: REST routes bare, "
+        "search/query routes ALSO with generic variants (?q=…, ?index=<resource> derived "
+        "from the other discovered resources). Returns `exposed` = endpoints that handed "
+        "back a 2xx DATA COLLECTION unauthenticated (record `unauth_read_sensitive` unless "
+        "the field names are clearly public), and `auth_enforced` (a sibling 401/403 → an "
+        "exposure is an authorization BYPASS). Read-only; returns status/shape/count/field-"
+        "NAMES only, never values. Run right after discover_paths.",
+        {"url": str},
+    )
+    async def probe_api_unauth_tool(args):
+        return _wrap(await session.probe_api_unauth(args["url"]))
+
+    @tool(
         "render_page",
         "Render a JS single-page app in a headless browser and report its REAL runtime "
         "traffic — the XHR/fetch API endpoints it actually calls (its true backend origin, "
@@ -261,6 +286,7 @@ def build_network_server(session: AssessmentSession):
             analyze_oauth_tool,
             check_tls_tool,
             discover_paths_tool,
+            probe_api_unauth_tool,
             render_page_tool,
         ],
     )

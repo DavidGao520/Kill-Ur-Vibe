@@ -84,10 +84,10 @@ def test_extract_scripts_handles_absolute_in_scope_bundle():
 # ---- gated session method ----
 
 class _Resp:
-    def __init__(self, status, text):
+    def __init__(self, status, text, headers=None):
         self.status_code = status
         self.text = text
-        self.headers = {}
+        self.headers = headers or {}
 
 
 class _MapClient:
@@ -111,7 +111,9 @@ def _session(pages, *, budget=None, targets=("app.example.com", "*.example.com")
         expires_at=date(2026, 12, 31), authorization_asserted=True,
     )
     client = _MapClient(pages)
-    return AssessmentSession(EgressEngine(scope, now=lambda: _NOW, budget=budget), client), client
+    engine = EgressEngine(scope, now=lambda: _NOW, budget=budget,
+                          ip_resolver=lambda h: ["93.184.216.34"])   # fake public IP (hermetic)
+    return AssessmentSession(engine, client), client
 
 
 def test_discover_paths_extracts_from_page_and_bundle():
@@ -187,3 +189,71 @@ def test_discover_paths_probe_stops_when_budget_exhausted():
     out = asyncio.run(session.discover_paths("https://app.example.com/", probe_wordlist=True))
     assert out["ok"] is True
     assert len(client.gets) <= 3                       # budget bounded the probing
+
+
+# ---- deterministic unauth API sweep ----
+
+def test_probe_api_unauth_catches_search_bypass_via_variants():
+    # The classic bypass: /v1/contacts correctly 401s, but /v1/search is an unguarded
+    # sibling that leaks records once you add ?q=&index=<resource>. A bare GET
+    # /v1/search does NOT leak, so the sweep must try generic variants.
+    pages = {
+        "https://app.example.com/": _Resp(200, '<script src="/b.js"></script>'),
+        "https://app.example.com/b.js": _Resp(200, 'fetch("/v1/contacts");fetch("/v1/search");'),
+        "https://app.example.com/v1/contacts": _Resp(401, '{"error":"Not authenticated"}'),
+        "https://app.example.com/v1/search": _Resp(400, '{"error":"q required"}'),
+        "https://app.example.com/v1/search?q=a&index=contacts": _Resp(
+            200, '[{"name":"REDACTME","email":"SECRET","scrapedProfile":"PRIVATE"}]'),
+    }
+    session, _ = _session(pages)
+    out = asyncio.run(session.probe_api_unauth("https://app.example.com/"))
+    assert out["ok"] is True
+    assert out["auth_enforced"] is True                       # /v1/contacts 401 → a gate exists
+    exposed = {e["path"] for e in out["exposed"]}
+    assert "/v1/search?q=a&index=contacts" in exposed         # the bypass surfaced deterministically
+    hit = [e for e in out["exposed"] if "search" in e["path"]][0]
+    assert hit["shape"] == "array" and "email" in hit["keys"] and "scrapedProfile" in hit["keys"]
+    assert hit["bypass"] is True                              # exposed next to a 401 sibling = authz bypass
+    # NEVER leak values — only shape/count/field names
+    blob = str(out)
+    assert "REDACTME" not in blob and "SECRET" not in blob and "PRIVATE" not in blob
+
+
+def test_probe_api_unauth_reports_partial_coverage_when_truncated():
+    # cap smaller than the discovered API surface must be reported, not hidden.
+    pages = {
+        "https://app.example.com/": _Resp(200, '<script src="/b.js"></script>'),
+        "https://app.example.com/b.js": _Resp(
+            200, 'fetch("/v1/a");fetch("/v1/b");fetch("/v1/c");'),
+        "https://app.example.com/v1/a": _Resp(401, "{}"),
+        "https://app.example.com/v1/b": _Resp(401, "{}"),
+        "https://app.example.com/v1/c": _Resp(401, "{}"),
+    }
+    session, _ = _session(pages)
+    out = asyncio.run(session.probe_api_unauth("https://app.example.com/", cap=2))
+    assert out["discovered_api_count"] == 3 and out["truncated"] == 1
+    assert out["partial"] is True                              # coverage was NOT exhaustive
+
+
+def test_probe_api_unauth_flags_bare_unauth_collection():
+    pages = {
+        "https://app.example.com/": _Resp(200, '<script src="/b.js"></script>'),
+        "https://app.example.com/b.js": _Resp(200, 'fetch("/api/users");'),
+        "https://app.example.com/api/users": _Resp(200, '[{"id":1,"email":"x"},{"id":2,"email":"y"}]'),
+    }
+    session, _ = _session(pages)
+    out = asyncio.run(session.probe_api_unauth("https://app.example.com/"))
+    assert {e["path"] for e in out["exposed"]} == {"/api/users"}
+    assert out["exposed"][0]["count"] == 2
+
+
+def test_probe_api_unauth_no_false_positive_when_all_protected():
+    pages = {
+        "https://app.example.com/": _Resp(200, '<script src="/b.js"></script>'),
+        "https://app.example.com/b.js": _Resp(200, 'fetch("/v1/contacts");fetch("/v1/orders");'),
+        "https://app.example.com/v1/contacts": _Resp(401, '{"error":"no"}'),
+        "https://app.example.com/v1/orders": _Resp(401, '{"error":"no"}'),
+    }
+    session, _ = _session(pages)
+    out = asyncio.run(session.probe_api_unauth("https://app.example.com/"))
+    assert out["exposed"] == [] and out["auth_enforced"] is True

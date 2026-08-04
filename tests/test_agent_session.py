@@ -43,7 +43,7 @@ class _FakeClient:
 def _session(*, is_fixture=True, resp: _FakeResp | None = None, resolver=None, targets=("ideas.example.com",)):
     scope = Scope(
         engagement_id="example",
-        authorized_by="david@xante.dev",
+        authorized_by="authorized@example.com",
         targets=targets,
         expires_at=date(2026, 12, 31),
         allowed_actions=frozenset({ActionClass.ACCOUNT_CREATE}),
@@ -51,7 +51,7 @@ def _session(*, is_fixture=True, resp: _FakeResp | None = None, resolver=None, t
         authorization_asserted=True,
     )
     client = _FakeClient(resp or _FakeResp(200, "hello"))
-    return AssessmentSession(EgressEngine(scope, now=lambda: _NOW), client, resolver), client
+    return AssessmentSession(EgressEngine(scope, now=lambda: _NOW, ip_resolver=lambda h: ["93.184.216.34"]), client, resolver), client
 
 
 def test_get_in_scope_performs_request():

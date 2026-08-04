@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from kuv.agent.spine import run_assessment
 from kuv.egress import RunBudget
-from kuv.gate import ActionClass, Scope
+from kuv.gate import ActionClass, Scope, registrable_domain
 from kuv.report import assemble_html_report
 
 # The synthetic-write classes the opt-in tier enables (never destructive; each still
@@ -53,8 +53,10 @@ def parse_target(raw: str) -> tuple[str, str, str]:
     host = (urlparse(raw).hostname or "").lower()
     if not host:
         raise ValueError("could not parse a hostname from that input")
-    labels = host.split(".")
-    apex = ".".join(labels[-2:]) if len(labels) >= 2 else host
+    # eTLD+1 via the Public Suffix List — NOT last-2-labels, which mis-scopes
+    # `a.b.co.uk` to `co.uk` (→ `*.co.uk`). Fall back to the host itself when the
+    # PSL yields no registrable part (single label / bare suffix / IP).
+    apex = registrable_domain(host) or host
     return raw, host, apex
 
 

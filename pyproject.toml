@@ -8,9 +8,10 @@ requires-python = ">=3.11"
 # agent spine (kuv.agent.spine) against a target.
 dependencies = [
     "pyyaml>=6.0",
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.2.128,<0.3",   # message/block types the streaming hook parses are 0.2.x
     "httpx>=0.27",
     "dnspython>=2.6",
+    "tldextract>=5.1",   # registrable-domain (eTLD+1) via the Public Suffix List
 ]
 
 [project.optional-dependencies]

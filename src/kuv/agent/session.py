@@ -8,7 +8,7 @@ verdict is ALLOW. The HTTP client is dependency-injected (any object with async
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from kuv.decoders import (
     analyze_http_posture,
@@ -29,6 +29,13 @@ from kuv.recon.dns import (
 )
 from kuv.recon.browser import BrowserProbe, mask_tokens, playwright_probe, redact_path, redact_url
 from kuv.recon.dns import enumerate_subdomains as _dns_enumerate
+from kuv.recon.endpoints import (
+    classify_json_body,
+    is_api_path,
+    is_exposed,
+    is_search_path,
+    resource_name,
+)
 from kuv.recon.paths import PATH_WORDLIST, extract_paths, extract_scripts, rank_paths
 from kuv.recon.tls import TlsProbe, ssl_tls_probe
 from kuv.recon.websocket import WsProbe, flags_sensitive, summarize_fields, websockets_probe
@@ -108,6 +115,7 @@ class AssessmentSession:
         ws_probe: WsProbe | None = None,
         tls_probe: TlsProbe | None = None,
         browser_probe: BrowserProbe | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> None:
         self.engine = engine
         self.client = client
@@ -116,6 +124,16 @@ class AssessmentSession:
         self.tls_probe: TlsProbe = tls_probe or ssl_tls_probe
         self.browser_probe: BrowserProbe = browser_probe or playwright_probe
         self.findings: list[Finding] = []
+        # Optional live-progress sink (VibeCheck streams these to the browser). Additive:
+        # None by default, so assess.py / wizard / eval are unchanged.
+        self._on_event = on_event
+
+    # Request headers a caller (the agent) may set — an allowlist. Everything else
+    # (Host, X-Forwarded-*, Connection/hop-by-hop, Content-Length, Transfer-Encoding, …)
+    # is DROPPED: a `Host`/`X-Forwarded-Host` could route a vhost/proxy to another tenant
+    # even while the URL host is in scope (a scope bypass); hop-by-hop/framing headers
+    # enable request smuggling.
+    _ALLOWED_REQ_HEADERS = frozenset({"authorization", "cookie", "accept"})
 
     async def http_request(
         self,
@@ -124,17 +142,29 @@ class AssessmentSession:
         body: str | None = None,
         action_class: ActionClass | None = None,
         content_type: str | None = None,
+        headers: dict | None = None,
     ) -> dict:
+        # Never-destructive as CODE, not just prompt: DELETE/PATCH cannot be issued at all
+        # (none of the write action classes is a delete — account_create=POST, object_put=PUT).
+        if method.upper() in ("DELETE", "PATCH"):
+            return {"ok": False,
+                    "error": "DELETE/PATCH are refused — kuv writes are non-destructive (POST/PUT only)"}
         verdict = self.engine.evaluate(EgressRequest(method.upper(), url, action_class=action_class))
         if verdict.decision is Decision.REFUSE:
             return {"ok": False, "error": f"REFUSED by egress gate: {verdict.reason}"}
         if verdict.decision is Decision.CONFIRM:
             return {"ok": False, "error": f"NEEDS OPERATOR CONFIRMATION: {verdict.reason}"}
         # Without a Content-Type, most JSON APIs reject a write with 415 / fail to parse the
-        # body — so a write MUST declare one (default application/json for a JSON body).
-        headers = {"content-type": content_type} if (content_type and body is not None) else None
+        # body — so a write MUST declare one (default application/json for a JSON body). Then
+        # merge in the caller's allowlisted headers (an Authorization/Cookie for auth depth).
+        hdrs: dict[str, str] = {}
+        if content_type and body is not None:
+            hdrs["content-type"] = content_type
+        for k, v in (headers or {}).items():
+            if str(k).strip().lower() in self._ALLOWED_REQ_HEADERS and len(str(k)) <= 64 and len(str(v)) <= 4096:
+                hdrs[str(k)] = str(v)
         try:
-            resp = await self.client.request(method.upper(), url, content=body, headers=headers)
+            resp = await self.client.request(method.upper(), url, content=body, headers=hdrs or None)
         except Exception as exc:  # noqa: BLE001 — surface the network error to the agent
             return {"ok": False, "error": f"request error: {exc}"}
         return {
@@ -188,6 +218,15 @@ class AssessmentSession:
             plain_impact=plain_impact,
         )
         self.findings.append(finding)
+        if self._on_event is not None:
+            self._on_event({
+                "type": "finding",
+                "severity": finding.severity().value,
+                "finding_type": getattr(finding.finding_type, "value", finding.finding_type),
+                "title": finding.title,
+                "location": finding.location,
+                "plain_impact": finding.plain_impact,
+            })
         result = {"ok": True, "severity": finding.severity().value, "priority": finding.priority()}
         if novel:
             result["novel"] = True
@@ -242,35 +281,63 @@ class AssessmentSession:
             "secrets": [{"type": h.detector, "count": h.count, "max_len": h.max_len} for h in hits],
         }
 
+    async def _sweep_posture(self, name: str) -> tuple[int | None, str, list[str]]:
+        """Gated GET of ``https://{name}/`` → ``(status, body, posture_gaps)``.
+
+        Returns ``(None, "", [])`` when the host is off-scope, unreachable, or the GET
+        errors. One fetch serves two purposes: the takeover fingerprint needs the
+        body, the deterministic header sweep needs the headers.
+        """
+        url = f"https://{name}/"
+        if self.engine.evaluate(EgressRequest("GET", url)).decision is not Decision.ALLOW:
+            return None, "", []
+        try:
+            resp = await self.client.get(url)
+        except Exception:  # noqa: BLE001 — an unreachable host is itself a signal
+            return None, "", []
+        gaps = analyze_http_posture(
+            resp.status_code, dict(resp.headers), _set_cookie_list(resp.headers)
+        ).gaps
+        return resp.status_code, getattr(resp, "text", "") or "", list(gaps)
+
     async def enumerate_subdomains(self, apex: str) -> dict:
-        """Enumerate common subdomains under an in-scope apex, flagging subdomain-
-        takeover candidates. For each host whose CNAME points at a takeover-prone
-        service, a gated HTTP GET checks whether the upstream app is actually gone
-        (a deleted-app fingerprint or 404/5xx) — catching the "resolves but dead app"
-        case that DNS alone (CNAME + no A) misses."""
+        """Map the attack surface under an in-scope apex: DNS-enumerate subdomains,
+        flag subdomain-takeover candidates, AND run the deterministic HTTP security-
+        posture sweep on the apex plus every live host it finds.
+
+        The posture sweep is done here, in code, on EVERY reachable host — not left to
+        per-host LLM discretion. That discretion was a real recall hole: an agent that
+        posture-checked the marketing site + app hosts but skipped a sibling API host
+        would silently miss that host's missing-header finding. Each host now carries a
+        `posture_gaps` list; a non-empty one is a `weak_transport_or_cors` finding the
+        agent must record. The takeover check still uses a gated GET to catch the
+        "resolves but dead app" case DNS alone (CNAME + no A) misses.
+        """
         allowed, reason = self.engine.check_host(apex, kind="dns")
         if not allowed:
             return {"ok": False, "error": f"REFUSED: {reason}"}
 
         hosts = _dns_enumerate(apex, self.resolver)
         out: list[dict] = []
+        # The apex itself is not in the subdomain wordlist — sweep it explicitly so a
+        # gap on the primary host is always covered.
+        apex_status, _, apex_gaps = await self._sweep_posture(apex)
+        out.append({
+            "name": apex, "a": [], "cname": None, "dangling": False,
+            "takeover_service": None, "http_status": apex_status, "posture_gaps": apex_gaps,
+        })
         for host in hosts:
-            dangling, service, status = host.dangling, host.takeover_service, None
+            dangling, service = host.dangling, host.takeover_service
+            status, body, posture_gaps = None, "", []
+            if host.a or host.cname:                       # resolves → sweep it
+                status, body, posture_gaps = await self._sweep_posture(host.name)
             suffix = takeover_suffix(host.cname)
-            if suffix:
-                url = f"https://{host.name}/"
-                verdict = self.engine.evaluate(EgressRequest("GET", url))
-                if verdict.decision is Decision.ALLOW:
-                    try:
-                        resp = await self.client.get(url)
-                        status = resp.status_code
-                        if is_takeover(suffix, status, resp.text):
-                            dangling, service = True, suffix
-                    except Exception:  # noqa: BLE001 — unreachable host is itself a signal
-                        dangling, service = True, suffix
+            if suffix and (status is None or is_takeover(suffix, status, body)):
+                dangling, service = True, suffix           # dead app, or won't load at all
             out.append({
                 "name": host.name, "a": list(host.a), "cname": host.cname,
-                "dangling": dangling, "takeover_service": service, "http_status": status,
+                "dangling": dangling, "takeover_service": service,
+                "http_status": status, "posture_gaps": posture_gaps,
             })
         return {"ok": True, "apex": apex, "hosts": out}
 
@@ -451,6 +518,114 @@ class AssessmentSession:
             "paths": [{"path": p, "source": source.get(p, "?")} for p in ranked[:cap]],
             "bundles_scanned": bundles,
             "probed": probed,
+        }
+
+    async def probe_api_unauth(self, url: str, *, max_variants: int = 8, cap: int = 40) -> dict:
+        """Deterministically unauthenticated-probe every API endpoint discovered on
+        `url`'s host, so an unguarded data route can't be silently skipped.
+
+        Discovers paths (page + JS bundles via `discover_paths`), selects the API
+        routes (`/v1`, `/api`, `/graphql`, `/rest`), and GETs each with NO auth. REST
+        routes are probed bare; search/query routes are ALSO probed with generic
+        variants (`?q=…`, and `?index=<resource>` where `<resource>` is derived from
+        the OTHER discovered resources — never a hardcoded value) because they need
+        params to return data. An endpoint returning a 2xx DATA COLLECTION
+        unauthenticated is an `exposed` candidate — the agent files
+        `unauth_read_sensitive` for it unless the field names are clearly public.
+        `auth_enforced` is true when any sibling returned 401/403 (an exposure next to
+        it is an authorization BYPASS). Read-only (GET only); values are never
+        returned — only status / shape / count / field NAMES.
+        """
+        from urllib.parse import urlparse
+
+        disc = await self.discover_paths(url)
+        if not disc.get("ok"):
+            return {"ok": False, "error": disc.get("error", "path discovery failed")}
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+
+        discovered_api = [p["path"] for p in disc["paths"] if is_api_path(p["path"])]
+        api_paths = discovered_api[:cap]
+        truncated = len(discovered_api) - len(api_paths)     # coverage we dropped (no silent caps)
+        resources: list[str] = []
+        for p in api_paths:
+            r = resource_name(p)
+            if r and r not in resources:
+                resources.append(r)
+
+        budget_hit = False
+
+        async def _get(target: str):
+            nonlocal budget_hit
+            verdict = self.engine.evaluate(EgressRequest("GET", target))
+            if verdict.decision is not Decision.ALLOW:
+                if "budget" in (verdict.reason or "").lower():
+                    budget_hit = True                        # coverage was cut short, not clean
+                return None
+            try:
+                return await self.client.get(target)
+            except Exception:  # noqa: BLE001 — unreachable endpoint is not an exposure
+                return None
+
+        def _classify(resp) -> dict:
+            return classify_json_body(
+                resp.status_code, dict(resp.headers).get("content-type", ""),
+                getattr(resp, "text", "") or "",
+            )
+
+        endpoints: list[dict] = []
+        exposed: list[dict] = []
+        auth_enforced = False
+        probed = 0
+
+        for p in api_paths:
+            resp = await _get(origin + p)
+            if resp is None:
+                continue
+            probed += 1
+            if resp.status_code in (401, 403):
+                auth_enforced = True
+            cls = _classify(resp)
+            rec = {"path": p, "status": resp.status_code, **cls}
+            endpoints.append(rec)
+            if is_exposed(resp.status_code, cls):
+                rec["exposed"] = True
+                exposed.append(rec)
+                continue
+            if not is_search_path(p):
+                continue
+            # Search routes need params to return data — try generic variants (bounded).
+            # Query-param NAMES are common conventions; `index=<resource>` values come
+            # from what we discovered on THIS host, not a fixed target-specific list.
+            variants = ["?q=a", "?query=a", "?search=a", "?term=a"] + [
+                f"?q=a&index={r}" for r in resources[:4]
+            ]
+            for qs in variants[:max_variants]:
+                vresp = await _get(origin + p + qs)
+                if vresp is None:
+                    continue
+                probed += 1
+                if vresp.status_code in (401, 403):
+                    auth_enforced = True
+                vcls = _classify(vresp)
+                if is_exposed(vresp.status_code, vcls):
+                    hit = {"path": p + qs, "status": vresp.status_code, "exposed": True, **vcls}
+                    endpoints.append(hit)
+                    exposed.append(hit)
+                    break
+
+        # An exposure NEXT TO a protected sibling (a 401/403 somewhere in the family) is
+        # an authorization BYPASS — the high-severity case. Flag those specifically so a
+        # wall of `exposed` on a fully-public API doesn't drown the real bypass.
+        for e in exposed:
+            e["bypass"] = auth_enforced
+        partial = budget_hit or truncated > 0                # coverage was NOT exhaustive
+
+        return {
+            "ok": True, "url": url, "auth_enforced": auth_enforced,
+            "resources": resources, "endpoints": endpoints, "exposed": exposed,
+            "discovered_api_count": len(discovered_api), "probed": probed,
+            "truncated": truncated, "partial": partial,
         }
 
     async def render_page(self, url: str) -> dict:

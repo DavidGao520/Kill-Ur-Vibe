@@ -69,7 +69,7 @@ def _session(*, is_fixture=True, allowed=(ActionClass.ACCOUNT_CREATE,), resp=Non
     )
     client = _FakeClient(resp or _FakeResp(200, "hello"))
     session = AssessmentSession(
-        EgressEngine(scope, now=lambda: _NOW), client, ws_probe=ws, tls_probe=tls
+        EgressEngine(scope, now=lambda: _NOW, ip_resolver=lambda h: ["93.184.216.34"]), client, ws_probe=ws, tls_probe=tls
     )
     return session, client
 
@@ -173,7 +173,7 @@ def test_check_tls_off_scope_refused_and_no_probe():
 def test_subdomain_takeover_and_email_spoofing_are_recordable_finding_types():
     # The methodology tells the agent to file these; the enum must accept them.
     session, _ = _session()
-    a = session.record_finding("subdomain_takeover", "Dangling CNAME", "conga.example.com", "dangling")
+    a = session.record_finding("subdomain_takeover", "Dangling CNAME", "gateway.example.com", "dangling")
     b = session.record_finding("email_spoofing", "DMARC p=none", "example.com", "unenforced")
     assert a["ok"] is True and a["severity"] == "High"
     assert b["ok"] is True and b["severity"] == "Medium"

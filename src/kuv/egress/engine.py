@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from kuv.gate.scope import ActionClass, Scope
 
 from .budget import RunBudget
+from .ssrf import _default_resolve, host_ip_safety
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -62,11 +63,13 @@ class EgressEngine:
         now: DateFn,
         audit: AuditSink = _noop_audit,
         budget: RunBudget | None = None,
+        ip_resolver: Callable[[str], list[str]] | None = None,
     ) -> None:
         self._scope = scope
         self._now = now
         self._audit = audit
         self._budget = budget
+        self._ip_resolver = ip_resolver or _default_resolve
         self._confirmed: set[ActionClass] = set()
 
     def confirm(self, action_class: ActionClass) -> None:
@@ -99,6 +102,12 @@ class EgressEngine:
             return audit("refuse", f"engagement {self._scope.engagement_id} expired")
         if not self._scope.host_in_scope(host):
             return audit("refuse", f"{host} is out of authorized scope")
+        # A ws/browser/scan-fetch connect must not reach a non-public IP either (SSRF).
+        # A pure DNS lookup (`kind == "dns"`) does not connect, so it is exempt.
+        if not self._scope.is_fixture and kind != "dns":
+            ok, why = host_ip_safety(host, self._ip_resolver)
+            if not ok:
+                return audit("refuse", f"SSRF-blocked: {why}")
         return audit("allow", f"{kind} of in-scope host")
 
     def evaluate(self, request: EgressRequest) -> EgressVerdict:
@@ -144,6 +153,18 @@ class EgressEngine:
             )
         if not self._scope.host_in_scope(host):
             return verdict(Decision.REFUSE, f"{host} is out of authorized scope")
+
+        # SSRF guard: on a live (non-fixture) engagement, only http/https, and refuse a
+        # host that IS or RESOLVES TO a non-public IP (loopback/private/link-local/CGNAT/
+        # metadata). The scope is a hostname match; without this a user-supplied target of
+        # `127.0.0.1` / `192.168.x` / `169.254.169.254` would pass scope and reach internal nets.
+        if not self._scope.is_fixture:
+            scheme = urlparse(request.url).scheme.lower()
+            if scheme and scheme not in ("http", "https"):
+                return verdict(Decision.REFUSE, f"scheme {scheme!r} not allowed (http/https only)")
+            ok, why = host_ip_safety(host, self._ip_resolver)
+            if not ok:
+                return verdict(Decision.REFUSE, f"SSRF-blocked: {why}")
 
         if classification is Classification.PASSIVE:
             return verdict(Decision.ALLOW, "passive read of in-scope host")

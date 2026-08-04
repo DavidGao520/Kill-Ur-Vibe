@@ -66,7 +66,7 @@ def _session(browser, *, allowed=(), targets=("app.example.com", "*.example.com"
         authorization_asserted=True,
     )
     client = _FakeClient()
-    return AssessmentSession(EgressEngine(scope, now=lambda: _NOW), client, browser_probe=browser)
+    return AssessmentSession(EgressEngine(scope, now=lambda: _NOW, ip_resolver=lambda h: ["93.184.216.34"]), client, browser_probe=browser)
 
 
 def test_strip_query_removes_token_bearing_query():

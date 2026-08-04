@@ -20,9 +20,11 @@ def test_parse_full_url_with_subdomain():
     assert host == "app.example.com" and apex == "example.com"
 
 
-def test_parse_deep_subdomain_takes_last_two_labels():
-    _, host, apex = parse_target("http://a.b.example.co")
-    assert host == "a.b.example.co" and apex == "example.co"
+def test_parse_multilabel_suffix_uses_registrable_not_last_two():
+    # Regression: last-2-labels gave apex='co.uk' → scope '*.co.uk' (the entire UK
+    # commercial namespace). The PSL keeps the registrable 'example.co.uk'.
+    _, host, apex = parse_target("http://a.b.example.co.uk")
+    assert host == "a.b.example.co.uk" and apex == "example.co.uk"
 
 
 def test_parse_rejects_junk():

@@ -62,9 +62,9 @@ def test_html_redacts_pii_in_evidence():
 def test_header_never_emits_an_email():
     # Even the operator's own email passed as prepared_for must be redacted.
     html = assemble_html_report(
-        _findings(), target="t", exec_brief="x", prepared_for="david@xante.dev", date_str="2026-08-03"
+        _findings(), target="t", exec_brief="x", prepared_for="someone@example.com", date_str="2026-08-03"
     )
-    assert "david@xante.dev" not in html
+    assert "someone@example.com" not in html
 
 
 def test_html_renders_evidence_rows_as_table():

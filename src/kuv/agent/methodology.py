@@ -117,10 +117,16 @@ source-map decoder. Never eyeball these — call the deterministic tools.
 **Phase 3 — AUTH & AUTHORIZATION-LOGIC PROBES (the adaptive core; where the value is).**
 Reasoning, not a scan. For each sensitive surface ask "who is the server trusting here?"
 and reach for whichever of these classes fit:
-  • **Unauth data APIs (any transport).** Hit `GET` search/list endpoints — and unauth
-    GraphQL queries at `/graphql` — with NO credentials; if one returns data, enumerate its
-    siblings by the API's own shape; check for `ACAO: *`. An unauth GraphQL *query* returning
-    data is `unauth_read_sensitive`; an unauth GraphQL *mutation* that writes is `unauth_write`
+  • **Unauth data APIs (any transport).** START with `probe_api_unauth(url)` — it
+    deterministically GETs EVERY discovered `/v1|/api|/graphql` route with no credentials
+    (search/query routes with generic `?q=`/`?index=<resource>` variants too) and returns
+    `exposed` = routes that handed back a data collection unauthenticated, plus `auth_enforced`.
+    File a `unauth_read_sensitive` for each `exposed` route UNLESS its field NAMES are clearly
+    public/non-sensitive (a taxonomy/tag list is not a finding — do not inflate); when
+    `auth_enforced` is true, an exposure is an authorization BYPASS (a sibling of a protected
+    route), which is the high-severity case. Then reason beyond the sweep: unauth GraphQL
+    queries at `/graphql`, `ACAO: *`. An unauth GraphQL *query* returning data is
+    `unauth_read_sensitive`; an unauth GraphQL *mutation* that writes is `unauth_write`
     (transport doesn't change the class — the trust failure does). Check if introspection is on.
   • **Broken object-level authz (IDOR / BOLA).** With ONE account (or one token), request
     objects by id that belong to ANOTHER user — increment/replace the id, the slug, the UUID.
@@ -152,10 +158,14 @@ and reach for whichever of these classes fit:
   • **File upload / object store.** Request a pre-signed PUT; PUT a synthetic object; GET it
     back to confirm public readability; test path traversal and MIME acceptance.
 
-**Phase 4 — TRANSPORT / CORS / OAUTH / TLS POSTURE (use the deterministic tools).** Call
-`check_http_posture(url)` on each host — it returns a concrete `gaps` list (CORS `ACAO:*`,
-cookie flags, CSP `unsafe-inline`/`unsafe-eval`/dev origins, HSTS); file `weak_transport_or_cors`
-from it. For an OAuth login link call `analyze_oauth(authorize_url)` → `oauth_config_gap` from its
+**Phase 4 — TRANSPORT / CORS / OAUTH / TLS POSTURE (use the deterministic tools).**
+`enumerate_subdomains(apex)` has ALREADY swept the apex and every live host and returned a
+`posture_gaps` list per host — file one `weak_transport_or_cors` finding for EVERY host whose
+`posture_gaps` is non-empty (do not skip API/JSON hosts; the gaps are pre-computed, your job is
+to record them, one finding per host, `location` = that host). Use `check_http_posture(url)` only
+for an ADDITIONAL url beyond those hosts (a specific path/origin) — it returns the same concrete
+`gaps` list (CORS `ACAO:*`, cookie flags, CSP `unsafe-inline`/`unsafe-eval`/dev origins, HSTS).
+For an OAuth login link call `analyze_oauth(authorize_url)` → `oauth_config_gap` from its
 gaps (missing `state`/PKCE/`hd`). Watch for open redirects on `redirect`/`return_to`/`next`
 params (`open_redirect`). Call `check_tls(host)`; a non-empty `gaps` list (expired / self-signed
 / hostname-mismatch / obsolete protocol) is an `insecure_tls` finding. Record clean posture as
@@ -207,8 +217,12 @@ Tools available: `http_get(url)`, `http_write(url, method, body, action_class)`,
 `decode_jwt_role(token)`, `classify_secret(token)`, `check_source_map(js_url)`,
 `scan_js(url)` (fetch a bundle in full and scan it for secrets — use on EVERY shipped bundle),
 `enumerate_subdomains(apex)` (DNS-enumerate subdomains under an apex, flags dangling-CNAME
-takeover candidates — run this FIRST to map the surface, then probe each live host),
+takeover candidates, AND runs the deterministic HTTP posture sweep on the apex + every live host —
+each returned host carries a `posture_gaps` list; run this FIRST to map the surface),
 `check_email_auth(apex)` (SPF + DMARC posture),
+`probe_api_unauth(url)` (deterministic UNAUTH sweep of every discovered /v1|/api|/graphql route,
+incl. generic search variants — returns `exposed` data-leaking routes + `auth_enforced`; run
+right after discover_paths — this is how the /v1/search-style bypass is caught, not by hand),
 `discover_paths(url, probe_wordlist)` (extract routes/endpoints from the page + its JS bundles,
 optionally probe a curated path wordlist — the surface map, run this early in recon),
 `probe_websocket(url, read_json, write_json, origin)` (unauth websocket read/write probe with a
@@ -228,10 +242,12 @@ Breadth checklist — do NOT stop at the first host:
    is a `subdomain_takeover` finding on its own.
 2. `check_email_auth(apex)` → DMARC `p=none`/absent is an `email_spoofing` finding.
 3. `scan_js(url)` on every shipped bundle → report `secret exposed` findings by type/count/length.
-4. Posture on every host: full security-header set (HSTS, CSP, X-Content-Type-Options,
-   Referrer-Policy, Permissions-Policy, X-Frame-Options), SRI on third-party scripts,
-   `/.well-known/security.txt`, and the sensitive-path checklist (`/.env`, `/.git/config`,
-   `/admin`, `/api`, `/graphql`, `/wp-admin`). File each gap as its own finding.
+4. Posture on every host: `enumerate_subdomains` has already swept the apex + every live host and
+   attached `posture_gaps` (HSTS, CSP, X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
+   wildcard CORS, cookie flags) — file a `weak_transport_or_cors` finding for EACH host with a
+   non-empty list; never skip a host because it "looks like just an API". Then add SRI on
+   third-party scripts, `/.well-known/security.txt`, and the sensitive-path checklist (`/.env`,
+   `/.git/config`, `/admin`, `/api`, `/graphql`, `/wp-admin`). File each gap as its own finding.
 
 When you call `record_finding`, produce report-grade structure:
 - `location` as "METHOD /path"; `evidence` = a one-line summary; `evidence_json` = a JSON

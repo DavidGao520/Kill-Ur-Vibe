@@ -53,7 +53,7 @@ def _scope() -> Scope:
 
 
 def test_engine_refuses_over_budget_request():
-    engine = EgressEngine(_scope(), now=lambda: _NOW, budget=RunBudget(max_requests=2, clock=_Clock()))
+    engine = EgressEngine(_scope(), now=lambda: _NOW, budget=RunBudget(max_requests=2, clock=_Clock()), ip_resolver=lambda h: ["93.184.216.34"])
     get = EgressRequest("GET", "https://app.example.com/a")
     assert engine.evaluate(get).decision is Decision.ALLOW
     assert engine.evaluate(get).decision is Decision.ALLOW
@@ -63,7 +63,7 @@ def test_engine_refuses_over_budget_request():
 
 
 def test_no_budget_means_no_cap():
-    engine = EgressEngine(_scope(), now=lambda: _NOW)  # budget=None
+    engine = EgressEngine(_scope(), now=lambda: _NOW, ip_resolver=lambda h: ["93.184.216.34"])  # budget=None
     get = EgressRequest("GET", "https://app.example.com/a")
     for _ in range(50):
         assert engine.evaluate(get).decision is Decision.ALLOW

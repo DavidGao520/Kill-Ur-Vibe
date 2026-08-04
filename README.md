@@ -95,14 +95,20 @@ It writes a polished HTML report to `runs/` (open it, Cmd-P → Save as PDF).
 
 ## What the agent can do
 
-Fifteen gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
+Sixteen gated tools: `http_get`, `http_write` (gated, per action class), `record_finding`,
 `decode_jwt_role`, `classify_secret`, `check_source_map`, `scan_js` (full-bundle secret
-scan), `enumerate_subdomains` (DNS + dangling-CNAME takeover detection), `check_email_auth`
-(SPF / DMARC), `discover_paths` (route/endpoint discovery from the page + JS bundles, with an
-optional path wordlist), `probe_websocket` (unauthenticated websocket read/write probe with a
-values-free field summary), `check_http_posture` (deterministic CSP / cookie / CORS / HSTS
-gap analysis), `analyze_oauth` (authorize-URL `state` / PKCE / `hd` analysis),
-`check_tls` (certificate validity / expiry / hostname / protocol), and
+scan), `enumerate_subdomains` (DNS + dangling-CNAME takeover detection, plus a deterministic
+security-header / CORS / TLS posture sweep of the apex and *every* live host — so no host's
+missing-header finding is left to per-host chance), `check_email_auth` (SPF / DMARC),
+`discover_paths` (route/endpoint discovery from the page + JS bundles, with an optional path
+wordlist), `probe_api_unauth` (a deterministic *unauthenticated* sweep of every discovered
+`/v1`|`/api`|`/graphql` route — search routes with generic `?q=` / `?index=<resource>` variants
+— that flags any route returning a data collection with no login, the way an unguarded
+`/v1/search`-style authorization bypass is caught rather than left to the model's discretion),
+`probe_websocket` (unauthenticated websocket read/write probe with a values-free field summary),
+`check_http_posture` (deterministic CSP / cookie / CORS / HSTS gap analysis), `analyze_oauth`
+(authorize-URL `state` / PKCE / `hd` analysis), `check_tls` (certificate validity / expiry /
+hostname / protocol), and
 `render_page` (headless-browser render of a JS SPA — reports its real runtime XHR/API
 endpoints, true backend origin, client-side routes, and websockets; every browser request
 is egress-gated, off-scope aborted).
@@ -114,11 +120,12 @@ at the prompt to run purely read-only.
 
 ## Status
 
-Thin core is built and unit-tested (199 tests): egress policy engine + authorization
-scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
-scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, the keystone-gated
-headless-browser render probe, and the report generator. **Deferred:** none of the core
-probe classes — expansion only.
+Thin core is built and unit-tested (241 tests): egress policy engine + authorization
+scope (with a Public-Suffix-List registrable-domain helper and connect-time IP pinning),
+deterministic decoders + severity rules, the Claude Agent SDK harness, the secret scanner,
+DNS recon + per-host posture sweep, the unauthenticated API-endpoint sweep, the websocket /
+HTTP-posture / OAuth / TLS probes, the keystone-gated headless-browser render probe, and the
+report generator. **Deferred:** none of the core probe classes — expansion only.
 
 The finding vocabulary is open: common authorization-bug classes (broken object-level
 access / IDOR, privilege-escalation, mass-assignment, forgeable tokens, SSRF, open-redirect)

@@ -26,9 +26,12 @@ def _scope(**overrides) -> Scope:
     return Scope(**base)
 
 
-def _engine(scope: Scope | None = None):
+def _engine(scope: Scope | None = None, ip_resolver=lambda h: ["93.184.216.34"]):
+    # ip_resolver defaults to a fake PUBLIC IP so the SSRF guard passes and these
+    # scope/budget/write tests stay hermetic (no live DNS).
     events: list[dict] = []
-    engine = EgressEngine(scope or _scope(), now=lambda: _NOW, audit=events.append)
+    engine = EgressEngine(scope or _scope(), now=lambda: _NOW, audit=events.append,
+                          ip_resolver=ip_resolver)
     return engine, events
 
 

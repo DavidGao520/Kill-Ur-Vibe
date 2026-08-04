@@ -11,12 +11,20 @@ against the installed claude-agent-sdk version; adjust here if the SDK differs.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlparse
 
 import httpx
-from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    HookMatcher,
+    TextBlock,
+    ToolUseBlock,
+    query,
+)
 
 from kuv.egress import EgressEngine, RunBudget
 from kuv.egress.ssrf import _default_resolve, pinned_async_client
@@ -101,6 +109,7 @@ async def run_assessment(
     max_budget_usd: float = DEFAULT_MAX_BUDGET_USD,
     confirm_actions: frozenset[ActionClass] = frozenset(),
     task: str | None = None,
+    on_event: Callable[[dict], None] | None = None,
 ) -> AssessmentResult:
     """Run one autonomous assessment of `target` under `scope`.
 
@@ -124,8 +133,16 @@ async def run_assessment(
     for action in confirm_actions:
         if action in scope.allowed_actions:      # never confirm a class the scope did not allow
             engine.confirm(action)
+
+    def _emit(evt: dict) -> None:
+        if on_event is not None:
+            on_event(evt)
+
+    def _short(name: str) -> str:
+        return name.rsplit("__", 1)[-1] if name else name
+
     async with build_scan_client(scope, target) as client:
-        session = AssessmentSession(engine, client)
+        session = AssessmentSession(engine, client, on_event=on_event)
         server = build_network_server(session)
         options = ClaudeAgentOptions(
             model=model,
@@ -140,7 +157,16 @@ async def run_assessment(
         final_text = ""
         cost_usd: float | None = None
         usage: object | None = None
+        _emit({"type": "status", "phase": "recon", "message": f"Assessing {target}"})
         async for message in query(prompt=task or task_prompt(target), options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock) and block.text.strip():
+                        _emit({"type": "narration", "text": block.text})
+                    elif isinstance(block, ToolUseBlock):
+                        detail = str(block.input.get("url") or block.input.get("location")
+                                     or block.input.get("apex") or "")
+                        _emit({"type": "tool", "name": _short(block.name), "detail": detail})
             result = getattr(message, "result", None)
             if isinstance(result, str):
                 final_text = result
@@ -150,4 +176,5 @@ async def run_assessment(
             used = getattr(message, "usage", None)
             if used is not None:
                 usage = used
+        _emit({"type": "done", "counts": dict(Counter(f.severity().value for f in session.findings))})
     return AssessmentResult(session.findings, audit, final_text, budget, cost_usd, usage)

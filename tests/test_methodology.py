@@ -27,5 +27,5 @@ def test_prompt_documents_the_escape_hatch():
 
 
 def test_wordlist_is_generic():
-    for tell in ("ideas", "spark", "datatron", "conga-api", "swag"):
+    for tell in ("acme-crm", "widget-api", "clientco", "internal-billing", "promo-x"):
         assert tell not in SUBDOMAIN_WORDLIST, f"engagement-specific subdomain present: {tell!r}"
