@@ -1,4 +1,4 @@
-"""Per-run budget — bounds a runaway agent.
+"""Per-run budget — bounds a runaway agent (DESIGN-active-cli.md T9 / Codex #7).
 
 The egress engine charges the budget on every request, so the cap covers ALL agent
 activity (the tool-call count is what correlates with token cost). Once exhausted,
@@ -15,8 +15,8 @@ from typing import Callable
 
 @dataclass
 class RunBudget:
-    max_requests: int = 200          # tool-call cap (the main bound on token cost)
-    max_wall_seconds: float = 600.0
+    max_requests: int = 400          # tool-call cap (the main bound on token cost)
+    max_wall_seconds: float = 1200.0
     max_writes: int | None = None    # optional cap on state-changing requests
     clock: Callable[[], float] = time.monotonic
 

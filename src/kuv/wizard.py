@@ -196,9 +196,9 @@ def main() -> int:
     who = _ask("   Your name or email (for the report header, optional): ") or "operator"
     scope = build_scope(host, apex, who, allow_writes=allow_writes)
     confirm_actions = WRITE_TIER_ACTIONS if allow_writes else frozenset()
-    budget = RunBudget(max_requests=100, max_wall_seconds=600.0)
+    budget = RunBudget(max_requests=400, max_wall_seconds=1200.0)
 
-    pay = "your Claude subscription (no API fees)" if use_subscription else "your Anthropic key (≤ $2)"
+    pay = "your Claude subscription (no API fees)" if use_subscription else "your Anthropic key (≤ ~$6)"
     mode = "read-only" if not allow_writes else "read + synthetic writes"
     print(f"\nAssessing {url} … ({mode}; a few minutes; {model}; {pay}; capped at "
           f"{budget.max_requests} calls / {int(budget.max_wall_seconds // 60)} min)")

@@ -28,8 +28,8 @@ from .tools import TOOL_NAMES, build_network_server
 DEFAULT_MODEL = "claude-sonnet-5"
 # Hard loop/cost bounds at the SDK layer (the other half of T9 — the egress RunBudget
 # only caps tool-calls, so the LLM turn loop can run away past it without these).
-DEFAULT_MAX_TURNS = 40
-DEFAULT_MAX_BUDGET_USD = 2.0
+DEFAULT_MAX_TURNS = 120           # enough LLM turns to actually use a 400-tool-call budget
+DEFAULT_MAX_BUDGET_USD = 6.0      # hard spend cap per run (headroom for a full 400-call run)
 
 _ALLOWED = frozenset(TOOL_NAMES)
 _DISALLOWED_BUILTINS = [

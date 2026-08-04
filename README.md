@@ -37,7 +37,9 @@ explained on first use) and the exact evidence an engineer or AI needs to fix it
   Type `READ-ONLY` at the prompt to run purely read-only.
 - **No secret or PII values in reports.** Findings record presence / type / count /
   length only; a redaction pass scrubs the output.
-- **Bounded.** Hard caps on tool calls, wall-clock, and spend per run.
+- **Bounded.** Hard caps per run — by default ~400 tool calls / 20 min wall-clock / ~$6
+  spend (tunable via `KUV_MAX_REQUESTS` / `KUV_MAX_WALL` / `KUV_MAX_USD`); once any cap is
+  hit, further requests are refused and the agent stops with a partial, honest report.
 - **Deterministic where it matters.** Severity comes from a rule table, not the model;
   JWT-role / source-map / secret-prefix judgments come from deterministic decoders.
 

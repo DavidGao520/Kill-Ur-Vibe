@@ -52,12 +52,12 @@ def main(argv: list[str]) -> int:
 
     scope = load_scope_file(scope_path)
     budget = RunBudget(
-        max_requests=int(os.environ.get("KUV_MAX_REQUESTS", "100")),
-        max_wall_seconds=float(os.environ.get("KUV_MAX_WALL", "300")),
+        max_requests=int(os.environ.get("KUV_MAX_REQUESTS", "400")),
+        max_wall_seconds=float(os.environ.get("KUV_MAX_WALL", "1200")),
     )
     model = os.environ.get("KUV_MODEL", "claude-sonnet-5")
-    max_turns = int(os.environ.get("KUV_MAX_TURNS", "40"))
-    max_usd = float(os.environ.get("KUV_MAX_USD", "2.0"))
+    max_turns = int(os.environ.get("KUV_MAX_TURNS", "120"))
+    max_usd = float(os.environ.get("KUV_MAX_USD", "6.0"))
 
     print(f"Assessing {target}  (engagement {scope.engagement_id}, "
           f"{'READ-ONLY' if not scope.allowed_actions else 'writes: ' + ','.join(a.value for a in scope.allowed_actions)}; "
