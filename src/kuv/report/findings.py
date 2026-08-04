@@ -17,6 +17,9 @@ class Finding:
     # Optional richer structure for the polished report (falls back to `evidence`):
     evidence_rows: tuple[tuple[str, str], ...] = ()   # (probe, result) pairs
     recommendation: str = ""
+    # Plain-language, jargon-free statement of the real-world harm — the first thing a
+    # non-technical founder reads. Severity-calibrated; never dramatized.
+    plain_impact: str = ""
 
     def severity(self) -> Severity:
         return severity_for(

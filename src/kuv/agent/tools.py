@@ -76,7 +76,10 @@ def build_network_server(session: AssessmentSession):
         f"Record a PROVEN finding. finding_type must be one of: {_TYPES}. Severity is "
         f"assigned deterministically by the tool, not by you. `evidence` is a one-line "
         f"summary; `evidence_json` is a JSON array of [probe, result] pairs (the exact "
-        f"requests you sent and the responses that proved it); `recommendation` is the fix.",
+        f"requests you sent and the responses that proved it); `recommendation` is the fix. "
+        f"`plain_impact` is REQUIRED: one or two sentences in PLAIN language (no jargon, no "
+        f"acronyms) telling a non-technical founder what could actually go wrong and who is "
+        f"harmed — calibrated to severity, never dramatized. It is the first line they read.",
         {
             "finding_type": str,
             "title": str,
@@ -85,6 +88,7 @@ def build_network_server(session: AssessmentSession):
             "contains_pii_or_secrets": bool,
             "recommendation": str,
             "evidence_json": str,
+            "plain_impact": str,
         },
     )
     async def record_finding(args):
@@ -97,6 +101,7 @@ def build_network_server(session: AssessmentSession):
                 bool(args.get("contains_pii_or_secrets", False)),
                 args.get("recommendation", ""),
                 parse_evidence_rows(args.get("evidence_json", "")),
+                args.get("plain_impact", ""),
             )
         )
 

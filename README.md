@@ -15,7 +15,10 @@ CVEs a scanner catches; they're **authorization-logic** holes:
 
 Kill-Ur-Vibe is an autonomous agent (bring your own Anthropic key) that probes an
 app **you own or are authorized to assess**, reasons about *who the server trusts*,
-proves the holes with real requests, and produces a consultant-grade report.
+proves the holes with real requests, and produces a consultant-grade report. Every
+finding **leads with the plain-language harm** ("what could go wrong, and who's hurt")
+so a non-technical founder gets it at a glance — while keeping the precise terms (each
+explained on first use) and the exact evidence an engineer or AI needs to fix it.
 
 > ⚠️ **Authorized targets only.** This is an active-assessment tool. Point it only at
 > systems you own or have written permission to test. It is built to make unauthorized
@@ -103,7 +106,7 @@ at the prompt to run purely read-only.
 
 ## Status
 
-Thin core is built and unit-tested (146 tests): egress policy engine + authorization
+Thin core is built and unit-tested (159 tests): egress policy engine + authorization
 scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
 scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, and the report
 generator. **Deferred:** a headless browser for JS-heavy SPAs.

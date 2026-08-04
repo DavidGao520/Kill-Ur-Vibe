@@ -16,6 +16,7 @@ from typing import Iterable, Sequence
 from kuv.severity import Severity
 
 from .findings import Finding
+from .plain import Glosser, severity_plain, type_title
 from .redaction import redact_pii, redact_secrets
 
 _SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
@@ -90,6 +91,13 @@ th{background:var(--navy);color:#fff;text-align:left;font-weight:600;padding:9px
 td{padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
 tbody tr:nth-child(even){background:var(--zebra)}
 .finding{border:1px solid #e5e7ea;border-radius:4px;padding:16px 18px;margin:16px 0}
+.impact{background:#fbf3e6;border-left:4px solid var(--med);border-radius:3px;
+  padding:11px 14px;margin:12px 0 6px;font-size:14px;line-height:1.5;color:#3a3320}
+.impact.crit{background:#fbe9e9;border-left-color:var(--crit)}
+.impact.high{background:#fbeee9;border-left-color:var(--high)}
+.impact.low{background:#eef2fb;border-left-color:var(--low)}
+.impact b{color:#16202b}
+.sevmean{color:var(--muted);font-size:12px;margin:0 0 10px}
 .fhead{display:flex;gap:14px;align-items:flex-start;margin-bottom:4px}
 .badge{color:#fff;font-weight:700;font-size:11px;letter-spacing:.5px;padding:3px 9px;border-radius:2px;white-space:nowrap;margin-top:2px}
 .badge.crit{background:var(--crit)} .badge.high{background:var(--high)} .badge.med{background:var(--med)} .badge.low{background:var(--low)}
@@ -258,6 +266,7 @@ def assemble_html_report(
     secrets = tuple(secrets)
     ordered = sorted(findings, key=lambda f: (_SEV_ORDER.index(f.severity()), f.finding_type.value))
     counts = Counter(f.severity() for f in ordered)
+    glosser = Glosser()   # explains each security term on FIRST use, once per report
 
     # deterministic IDs per severity (C-01, H-01, M-01, ...)
     seen: dict[str, int] = {}
@@ -334,7 +343,7 @@ def assemble_html_report(
   <h2 class="section">Executive Brief</h2>
   {callout}
   <div class="stats">{exec_tiles}</div>
-  <div class="executive">{_md(exec_brief, secrets)}</div>
+  <div class="executive">{_md(glosser.gloss(_scrub(exec_brief, secrets)), secrets)}</div>
   <div class="chart"><div class="cap">Verified issue count by severity</div>
     <div class="note">Severity assigned by the deterministic rule table, not the model.</div>
     {bars}
@@ -371,12 +380,24 @@ def assemble_html_report(
                         f'<tbody>{rows}</tbody></table>')
         else:
             evidence = f'<div class="evi-block">{_e(f.evidence, secrets)}</div>'
-        fix = f'<h4>Recommended fix</h4><p>{_e(f.recommendation, secrets)}</p>' if f.recommendation else ""
+        # Redact BEFORE glossing: the glosser splices "(gloss)" into words and would
+        # otherwise fragment a secret/email past the redaction pass. Scrubbing first,
+        # then glossing the already-redacted text, is leak-safe (markers carry no terms).
+        fix = (f'<h4>Recommended fix</h4><p>{_e(glosser.gloss(_scrub(f.recommendation, secrets)), secrets)}</p>'
+               if f.recommendation else "")
+        title = _e(f.title or type_title(f.finding_type), secrets)
+        impact = (
+            f'<div class="impact {cls}"><b>What could go wrong:</b> {_e(f.plain_impact, secrets)}</div>'
+            if f.plain_impact else ""
+        )
+        sevmean = f'<div class="sevmean">{f.severity().value} — {html.escape(severity_plain(f.severity()))}</div>'
         cards += f"""
   <div class="finding">
     <div class="fhead"><span class="badge {cls}">{f.severity().value.upper()}</span>
-      <div><div class="ft">{fid[id(f)]} — {_e(f.title, secrets)}</div>
+      <div><div class="ft">{fid[id(f)]} — {title}</div>
       <div class="fl">{_e(f.location, secrets)}</div></div></div>
+    {impact}
+    {sevmean}
     <h4>Evidence</h4>
     {evidence}
     {fix}

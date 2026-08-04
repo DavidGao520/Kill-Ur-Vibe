@@ -145,6 +145,7 @@ class AssessmentSession:
         contains_pii_or_secrets: bool = False,
         recommendation: str = "",
         evidence_rows: tuple[tuple[str, str], ...] = (),
+        plain_impact: str = "",
     ) -> dict:
         try:
             ft = FindingType(finding_type)
@@ -167,6 +168,7 @@ class AssessmentSession:
             bool(contains_pii_or_secrets),
             evidence_rows=rows,
             recommendation=recommendation,
+            plain_impact=plain_impact,
         )
         self.findings.append(finding)
         return {"ok": True, "severity": finding.severity().value, "priority": finding.priority()}
