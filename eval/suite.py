@@ -32,6 +32,10 @@ from kuv.egress import RunBudget  # noqa: E402
 from kuv.gate import ActionClass, Scope  # noqa: E402
 
 MODEL = os.environ.get("KUV_MODEL", "claude-sonnet-5")
+# A held-out hit is rejected as a "shotgun" if the run produced more than this many
+# distinct finding types (spraying every type until one sticks). Tiny fixtures legitimately
+# yield 1 bug + a couple of posture/cookie/TLS gaps, so the cap has headroom above that.
+SHOTGUN_TYPE_CAP = 6
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -101,12 +105,17 @@ def _run_one(fx: dict) -> dict:
         allowed_io = sum(1 for a in result.audit if a.get("decision") == "allow")
         held_out_hit = None
         if fx["held_out"]:
-            # Credit requires BOTH the accepted class AND real gated I/O to the target — a
-            # finding recorded with zero allowed requests is not proof (fabrication guard).
-            # (Limitation: this checks the run made real requests, not that THIS finding's
-            # specific request fired. Full per-finding evidence-token binding is future work.)
+            # Credit requires the accepted class AND real gated I/O AND that the run is
+            # not a shotgun. Three guards, each closing a way to fake a hit:
+            #  - class present: the agent named the right trust failure;
+            #  - allowed_io > 0: it actually hit the target (no fabricated finding);
+            #  - not shotgun: it didn't just spray every type until one stuck.
+            # (Limitation: I/O check is per-run, not per-finding; full evidence-token
+            #  binding is future work. Precision is printed but NOT gated — legitimate
+            #  secondary findings like missing HSTS shouldn't count against a real hit.)
             class_present = bool(produced_types & set(fx["accept_types"]))
-            held_out_hit = class_present and allowed_io > 0
+            not_shotgun = len(produced_types) <= SHOTGUN_TYPE_CAP
+            held_out_hit = class_present and allowed_io > 0 and not_shotgun
         return {
             "name": fx["name"],
             "held_out": fx["held_out"],
@@ -115,6 +124,7 @@ def _run_one(fx: dict) -> dict:
             "recall": fidelity["recall"],
             "missed": fidelity["missed"],
             "produced_types": sorted(produced_types),
+            "n_types": len(produced_types),
             "allowed_io": allowed_io,
             "held_out_hit": held_out_hit,
         }
@@ -128,15 +138,18 @@ def _run_one(fx: dict) -> dict:
 
 def main() -> int:
     _load_dotenv()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("Set ANTHROPIC_API_KEY (env var or a .env file). This suite runs the live agent.")
-        return 2
+    # Auth is either a BYO API key OR your claude.ai subscription login (the SDK uses the
+    # claude.ai OAuth creds when no key is set — be logged in via `claude` first). No key
+    # required; the subscription path is free.
+    using_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    print("Auth: " + ("ANTHROPIC_API_KEY" if using_key
+                      else "claude.ai subscription login (no API key set)"))
 
     rows = [_run_one(fx) for fx in FIXTURES]
 
-    print("\n" + "=" * 74)
-    print(f"{'FIXTURE':<16} {'HELD-OUT':<9} {'AUTO':<5} {'PREC':<6} {'RECALL':<7} {'RESULT'}")
-    print("-" * 74)
+    print("\n" + "=" * 80)
+    print(f"{'FIXTURE':<16} {'HELD-OUT':<9} {'AUTO':<5} {'PREC':<6} {'RECALL':<7} {'#TYPES':<7} {'RESULT'}")
+    print("-" * 80)
     for r in rows:
         if r.get("error"):
             print(f"{r['name']:<16} ERROR: {r['error']}")
@@ -146,29 +159,28 @@ def main() -> int:
         res = ""
         if r["held_out"]:
             res = ("✓ " + ",".join(r["produced_types"])) if r["held_out_hit"] else "✗ MISSED"
-        print(f"{r['name']:<16} {held:<9} {auto:<5} {r['precision']:<6.2f} {r['recall']:<7.2f} {res}")
+        print(f"{r['name']:<16} {held:<9} {auto:<5} {r['precision']:<6.2f} {r['recall']:<7.2f} "
+              f"{r['n_types']:<7} {res}")
 
-    print("-" * 74)
+    print("-" * 80)
     ok_rows = [r for r in rows if not r.get("error")]
     autonomous_ho = [r for r in ok_rows if r["held_out"] and r["autonomous"]]
     reachability_ho = [r for r in ok_rows if r["held_out"] and not r["autonomous"]]
 
-    # Headline = recall on AUTONOMOUS held-out fixtures (the agent had to DISCOVER the bug),
-    # gated ALSO by a precision floor so a shotgun run that reports every type can't fake it.
-    PRECISION_FLOOR = 0.5
+    # Headline = recall on AUTONOMOUS held-out fixtures (the agent had to DISCOVER the bug).
+    # A hit already requires class + real gated I/O + not-a-shotgun (see _run_one), so the
+    # verdict is recall-only. Precision is shown for context, NOT gated — legitimate secondary
+    # findings (missing HSTS, cookie flags) are correct behavior and must not fail a real hit.
     if autonomous_ho:
         hits = sum(1 for r in autonomous_ho if r["held_out_hit"])
         total = len(autonomous_ho)
         ho_recall = hits / total
         mean_prec = sum(r["precision"] for r in autonomous_ho) / total
-        prec_ok = mean_prec >= PRECISION_FLOOR
-        passed = ho_recall == 1.0 and prec_ok
-        note = "" if prec_ok else f"  (precision {mean_prec:.2f} < {PRECISION_FLOOR} floor — shotgun?)"
-        verdict = "PASS" if passed else f"FAIL{note}"
+        verdict = "PASS" if ho_recall == 1.0 else "FAIL"
         print(f"GENERALIZATION (autonomous held-out): recall {ho_recall:.2f} ({hits}/{total}), "
-              f"mean precision {mean_prec:.2f} — {verdict}")
+              f"mean precision {mean_prec:.2f} (context only) — {verdict}")
         print("  Held-out = the METHOD is taught (Phase 3), but this app's endpoints/payloads")
-        print("  are unseen. Credit needs the class + real gated I/O to the target.")
+        print(f"  are unseen. Credit needs the class + real gated I/O + <={SHOTGUN_TYPE_CAP} distinct types.")
     else:
         print("No autonomous held-out fixtures configured.")
 

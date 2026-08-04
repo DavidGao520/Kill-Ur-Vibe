@@ -52,10 +52,34 @@ def _next_id() -> int:
     return nid
 
 
+# A minimal frontend so the ideas API is DISCOVERABLE by recon (a real vibe-coded app
+# ships a page/JS that reveals its endpoints). The bug is that /api/ideas needs no auth.
+_INDEX_HTML = b"""<!doctype html><html><head><title>Ideas</title></head><body>
+<h1>Ideas board</h1>
+<script>
+async function load() {
+  const r = await fetch('/api/ideas');           // list ideas
+  document.body.append(JSON.stringify(await r.json()));
+}
+async function add(title) {
+  await fetch('/api/ideas', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({title})});
+}
+load();
+</script>
+</body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     # Quiet the default per-request stderr logging so test output stays clean.
     def log_message(self, *args) -> None:  # noqa: D401, ANN002
         pass
+
+    def _send_html(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_json(self, status: int, payload) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -66,6 +90,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path in ("/", "/index.html"):
+            self._send_html(200, _INDEX_HTML)
+            return
         if self.path == "/health":
             self._send_json(200, {"status": "ok"})
             return

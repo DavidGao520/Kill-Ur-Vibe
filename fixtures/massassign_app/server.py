@@ -37,9 +37,39 @@ def _next_id() -> int:
         return nid
 
 
+# A minimal frontend so the signup API is DISCOVERABLE by recon (a real vibe-coded app
+# ships a signup page). The form shows only email/password — the mass-assignment bug is
+# that the SERVER also honors a `role` field the UI never sends.
+_INDEX_HTML = b"""<!doctype html><html><head><title>Sign up</title></head><body>
+<h1>Create your account</h1>
+<form id="signup">
+  <input name="email" type="email" placeholder="email">
+  <input name="password" type="password" placeholder="password">
+  <button>Sign up</button>
+</form>
+<script>
+document.getElementById('signup').onsubmit = async (e) => {
+  e.preventDefault();
+  await fetch('/api/signup', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({email: 'user@example.com', password: 'x'}),
+  });
+};
+</script>
+</body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:  # noqa: D401, ANN002 — quiet
         pass
+
+    def _send_html(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_json(self, status: int, payload) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -50,6 +80,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path in ("/", "/index.html"):
+            self._send_html(200, _INDEX_HTML)
+            return
         if self.path == "/health":
             self._send_json(200, {"status": "ok"})
             return

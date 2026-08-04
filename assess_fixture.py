@@ -74,9 +74,10 @@ def _fixture_scope() -> Scope:
 
 def main() -> int:
     _load_dotenv()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("Set ANTHROPIC_API_KEY (env var or a .env file with ANTHROPIC_API_KEY=...).")
-        return 2
+    # No API key required: with ANTHROPIC_API_KEY unset the SDK uses your claude.ai
+    # subscription login (be logged in via `claude` first). A key is only one option.
+    print("Auth: " + ("ANTHROPIC_API_KEY" if os.environ.get("ANTHROPIC_API_KEY")
+                      else "claude.ai subscription login (no API key set)"))
 
     server = subprocess.Popen(
         [sys.executable, "fixtures/vuln_app/server.py"],

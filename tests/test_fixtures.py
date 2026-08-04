@@ -82,13 +82,24 @@ def _get_json(url: str) -> tuple[int, dict]:
 
 def test_idor_app_serves_another_owners_order():
     with _serve("idor_app/server.py", 8780, http_health=True):
+        # Auth IS enforced — no token gets a 401 (so this is a real IDOR, not unauth read).
+        try:
+            _get_json("http://127.0.0.1:8780/api/orders/1")
+            assert False, "expected 401 without a token"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
         # We "log in" (issued a token for user 2) ...
         status, login = _post_json("http://127.0.0.1:8780/api/login", {"user": "x"})
         assert status == 200 and login["user_id"] == 2
-        # ... yet can read order 1, which belongs to user 1 (the IDOR).
-        status, order = _get_json("http://127.0.0.1:8780/api/orders/1")
-        assert status == 200
-        assert order["owner_user_id"] == 1        # a DIFFERENT owner than the caller
+        # ... yet with our token we can read order 1, which belongs to user 1 (the IDOR).
+        req = urllib.request.Request(
+            "http://127.0.0.1:8780/api/orders/1",
+            headers={"Authorization": "Bearer " + login["token"]},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            assert resp.status == 200
+            order = json.loads(resp.read().decode())
+        assert order["owner_user_id"] == 1        # a DIFFERENT owner than the caller (user 2)
         assert "@" in order["email"]              # cross-owner PII exposed
 
 
