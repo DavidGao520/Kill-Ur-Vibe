@@ -80,25 +80,37 @@ def _get_json(url: str) -> tuple[int, dict]:
 
 # --- idor_app: broken object-level authorization ---------------------------
 
-def test_idor_app_serves_another_owners_order():
+def _orders_get(oid: int, token: str | None):
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    req = urllib.request.Request(f"http://127.0.0.1:8780/api/orders/{oid}", headers=headers)
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        return resp.status, json.loads(resp.read().decode())
+
+
+def test_idor_app_is_a_real_idor_not_auth_bypass_or_unauth_read():
     with _serve("idor_app/server.py", 8780, http_health=True):
-        # Auth IS enforced — no token gets a 401 (so this is a real IDOR, not unauth read).
+        # Login genuinely verifies credentials — a wrong password is rejected (NOT a sham
+        # login, so "auth bypass" is not a valid characterization of this app).
         try:
-            _get_json("http://127.0.0.1:8780/api/orders/1")
-            assert False, "expected 401 without a token"
+            _post_json("http://127.0.0.1:8780/api/login", {"username": "demo", "password": "WRONG"})
+            assert False, "expected 401 on bad credentials"
         except urllib.error.HTTPError as exc:
             assert exc.code == 401
-        # We "log in" (issued a token for user 2) ...
-        status, login = _post_json("http://127.0.0.1:8780/api/login", {"user": "x"})
+        # No token -> 401, and a FABRICATED token -> 401 (so "unauthenticated read" is not
+        # valid either — the endpoint requires a genuinely-issued token).
+        for tok in (None, "made-up-token"):
+            try:
+                _orders_get(1, tok)
+                assert False, "expected 401 without a genuine token"
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 401
+        # Valid demo login -> a real token for user 2 ...
+        status, login = _post_json(
+            "http://127.0.0.1:8780/api/login", {"username": "demo", "password": "demo123"})
         assert status == 200 and login["user_id"] == 2
-        # ... yet with our token we can read order 1, which belongs to user 1 (the IDOR).
-        req = urllib.request.Request(
-            "http://127.0.0.1:8780/api/orders/1",
-            headers={"Authorization": "Bearer " + login["token"]},
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            assert resp.status == 200
-            order = json.loads(resp.read().decode())
+        # ... with which we read order 1, owned by user 1 (the IDOR — the ONLY correct label).
+        status, order = _orders_get(1, login["token"])
+        assert status == 200
         assert order["owner_user_id"] == 1        # a DIFFERENT owner than the caller (user 2)
         assert "@" in order["email"]              # cross-owner PII exposed
 
