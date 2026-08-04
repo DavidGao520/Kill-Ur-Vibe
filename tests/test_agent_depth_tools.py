@@ -31,7 +31,7 @@ class _FakeClient:
         self._resp = resp
         self.calls: list = []
 
-    async def request(self, method, url, *, content=None):
+    async def request(self, method, url, *, content=None, headers=None):
         self.calls.append((method, url, content))
         return self._resp
 

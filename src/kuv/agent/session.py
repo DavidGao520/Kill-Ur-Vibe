@@ -95,7 +95,7 @@ class _Response(Protocol):
 
 
 class _AsyncClient(Protocol):
-    async def request(self, method: str, url: str, *, content: Any = ...) -> _Response: ...
+    async def request(self, method: str, url: str, *, content: Any = ..., headers: Any = ...) -> _Response: ...
     async def get(self, url: str) -> _Response: ...
 
 
@@ -123,14 +123,18 @@ class AssessmentSession:
         url: str,
         body: str | None = None,
         action_class: ActionClass | None = None,
+        content_type: str | None = None,
     ) -> dict:
         verdict = self.engine.evaluate(EgressRequest(method.upper(), url, action_class=action_class))
         if verdict.decision is Decision.REFUSE:
             return {"ok": False, "error": f"REFUSED by egress gate: {verdict.reason}"}
         if verdict.decision is Decision.CONFIRM:
             return {"ok": False, "error": f"NEEDS OPERATOR CONFIRMATION: {verdict.reason}"}
+        # Without a Content-Type, most JSON APIs reject a write with 415 / fail to parse the
+        # body — so a write MUST declare one (default application/json for a JSON body).
+        headers = {"content-type": content_type} if (content_type and body is not None) else None
         try:
-            resp = await self.client.request(method.upper(), url, content=body)
+            resp = await self.client.request(method.upper(), url, content=body, headers=headers)
         except Exception as exc:  # noqa: BLE001 — surface the network error to the agent
             return {"ok": False, "error": f"request error: {exc}"}
         return {

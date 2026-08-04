@@ -20,7 +20,7 @@ class _FakeResp:
 
 
 class _FakeClient:
-    async def request(self, method, url, *, content=None):
+    async def request(self, method, url, *, content=None, headers=None):
         return _FakeResp()
 
     async def get(self, url):

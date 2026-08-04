@@ -30,8 +30,9 @@ class _FakeClient:
         self._resp = resp
         self.calls: list[tuple[str, str, object]] = []
 
-    async def request(self, method: str, url: str, *, content=None):
+    async def request(self, method: str, url: str, *, content=None, headers=None):
         self.calls.append((method, url, content))
+        self.last_headers = headers
         return self._resp
 
     async def get(self, url: str):
@@ -65,6 +66,16 @@ def test_get_off_scope_refused_and_no_io():
     out = asyncio.run(session.http_request("GET", "https://evil.com/x"))
     assert out["ok"] is False and "REFUSED" in out["error"]
     assert client.calls == []  # the tool performed NO network I/O
+
+
+def test_write_sets_content_type_header():
+    # Regression: without a Content-Type, JSON write APIs reject with 415 / can't parse.
+    session, client = _session(is_fixture=True)
+    asyncio.run(session.http_request(
+        "POST", "https://app.example.com/api/users", '{"email":"x@y.invalid"}',
+        ActionClass.ACCOUNT_CREATE, content_type="application/json",
+    ))
+    assert client.last_headers == {"content-type": "application/json"}
 
 
 def test_write_to_fixture_allowed():

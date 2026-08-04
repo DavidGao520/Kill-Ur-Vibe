@@ -101,7 +101,7 @@ class _MapClient:
         self.gets.append(url)
         return self.pages.get(url, _Resp(404, "not found"))
 
-    async def request(self, method, url, *, content=None):
+    async def request(self, method, url, *, content=None, headers=None):
         return await self.get(url)
 
 

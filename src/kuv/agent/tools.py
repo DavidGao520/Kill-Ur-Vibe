@@ -62,15 +62,21 @@ def build_network_server(session: AssessmentSession):
     @tool(
         "http_write",
         f"Synthetic HTTP write (POST/PUT/PATCH/DELETE) to an in-scope URL. "
-        f"action_class must be one of: {_ACTIONS}.",
-        {"url": str, "method": str, "body": str, "action_class": str},
+        f"action_class must be one of: {_ACTIONS}. `content_type` sets the request's "
+        f"Content-Type (default application/json) — REQUIRED for most JSON write APIs, which "
+        f"return 415 or fail to parse the body without it; use e.g. "
+        f"'application/x-www-form-urlencoded' or 'image/png' when appropriate.",
+        {"url": str, "method": str, "body": str, "action_class": str, "content_type": str},
     )
     async def http_write(args):
         try:
             action = ActionClass(args["action_class"])
         except ValueError:
             return _err(f"unknown action_class {args['action_class']!r}; one of: {_ACTIONS}")
-        return _wrap(await session.http_request(args["method"], args["url"], args.get("body"), action))
+        return _wrap(await session.http_request(
+            args["method"], args["url"], args.get("body"), action,
+            args.get("content_type") or "application/json",
+        ))
 
     @tool(
         "record_finding",

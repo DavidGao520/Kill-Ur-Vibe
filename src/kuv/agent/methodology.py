@@ -186,7 +186,9 @@ values-free field summary — the ONLY way to reach the unauth-websocket finding
 `render_page(url)` (headless-browser render of a JS SPA — reports the real XHR/fetch API
 endpoints, the true backend origin even when off-scope, client-side routes, and in-scope
 websocket frames; every browser request is egress-gated). Use it when a static fetch only
-returns an app shell.
+returns an app shell. It is REQUEST-HEAVY (~45 gated requests/call) — render the app SHELL
+and AUTH pages to find the API/websocket, NOT data-list/report sub-pages (which fire
+hundreds of requests and burn budget); on a small budget, render sparingly.
 
 Breadth checklist — do NOT stop at the first host:
 1. `enumerate_subdomains(apex)` → probe EACH live host it returns. A `dangling=true` result
