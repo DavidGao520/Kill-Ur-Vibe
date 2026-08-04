@@ -74,8 +74,13 @@ async def run_assessment(
     max_turns: int = DEFAULT_MAX_TURNS,
     max_budget_usd: float = DEFAULT_MAX_BUDGET_USD,
     confirm_actions: frozenset[ActionClass] = frozenset(),
+    task: str | None = None,
 ) -> AssessmentResult:
     """Run one autonomous assessment of `target` under `scope`.
+
+    `task` overrides the default task prompt — e.g. a focused follow-up ("recon is done,
+    go straight at the websocket / registration / upload classes") so a re-run doesn't
+    re-spend budget on recon. Defaults to the standard full-assessment prompt.
 
     Runaway is bounded on two layers: the egress `budget` caps tool-calls / wall-clock
     / writes, and `max_turns` + `max_budget_usd` hard-cap the LLM loop and its spend at
@@ -109,7 +114,7 @@ async def run_assessment(
         final_text = ""
         cost_usd: float | None = None
         usage: object | None = None
-        async for message in query(prompt=task_prompt(target), options=options):
+        async for message in query(prompt=task or task_prompt(target), options=options):
             result = getattr(message, "result", None)
             if isinstance(result, str):
                 final_text = result
