@@ -25,7 +25,7 @@ def test_enumerate_finds_live_hosts_and_skips_missing():
 
 def test_dangling_cname_flags_takeover():
     records = {
-        # legacy-api has a CNAME to Render but NO A record -> dangling/takeover-able
+        # gateway has a CNAME to Render but NO A record -> dangling/takeover-able
         ("gateway.example.com", "CNAME"): ["kuv-app.onrender.com."],
     }
     hosts = enumerate_subdomains("example.com", _resolver(records))

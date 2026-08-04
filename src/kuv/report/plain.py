@@ -1,7 +1,7 @@
 """Plain-language layer — reports must read for a non-technical founder first.
 
-Alex's rule: a founder skims the report by eye, then forwards it to an engineer or an
-AI. So (1) every finding leads with a plain-language statement of the real-world HARM
+Reader-first rule: a founder skims the report by eye, then forwards it to an engineer or
+an AI. So (1) every finding leads with a plain-language statement of the real-world HARM
 (what could go wrong, who's hurt) calibrated to severity — not jargon; (2) security
 terms keep their precise name but get a one-line plain gloss on FIRST use (so the
 engineer/AI still has the exact anchor); (3) internal finding-type tokens never appear
@@ -28,6 +28,12 @@ TYPE_TITLES: dict[FindingType, str] = {
     FindingType.SUBDOMAIN_TAKEOVER: "An abandoned subdomain could be hijacked by an attacker",
     FindingType.EMAIL_SPOOFING: "Anyone can send email pretending to be your domain",
     FindingType.INFO_DISCLOSURE: "A status/health endpoint exposes non-sensitive internals publicly",
+    FindingType.IDOR: "Logged-in users can read or change other people's records by changing an ID",
+    FindingType.PRIVILEGE_ESCALATION: "A normal user can turn themselves into an admin",
+    FindingType.MASS_ASSIGNMENT: "A form lets users set hidden fields they shouldn't control",
+    FindingType.JWT_FORGEABLE: "Login tokens can be forged, letting anyone impersonate any user",
+    FindingType.SSRF: "The server can be tricked into fetching internal or attacker-chosen URLs",
+    FindingType.OPEN_REDIRECT: "Your site can be used to bounce visitors to a scam page",
 }
 
 # One plain sentence per severity — what it means for the reader's calendar.
@@ -37,6 +43,7 @@ SEVERITY_PLAIN: dict[Severity, str] = {
     Severity.MEDIUM: "Worth fixing soon; it raises risk or helps a bigger attack.",
     Severity.LOW: "Minor on its own — fix when convenient.",
     Severity.INFO: "Informational — no direct risk by itself.",
+    Severity.NEEDS_OPERATOR: "A novel issue the tool can't auto-rate — a human should judge severity.",
 }
 
 # Security term -> a one-line plain gloss. First use in the report is rendered as
@@ -74,7 +81,11 @@ _PATTERNS = {
 }
 
 
-def type_title(finding_type: FindingType, fallback: str = "") -> str:
+def type_title(finding_type: FindingType | str, fallback: str = "") -> str:
+    # A novel (escape-hatch) finding_type is a raw str with no TYPE_TITLES entry;
+    # humanize it rather than crash on `.value`.
+    if not isinstance(finding_type, FindingType):
+        return fallback or str(finding_type).replace("_", " ").capitalize()
     return TYPE_TITLES.get(finding_type, fallback or finding_type.value)
 
 

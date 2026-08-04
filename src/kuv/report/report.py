@@ -17,7 +17,14 @@ _SEVERITY_RANK: dict[Severity, int] = {
     Severity.MEDIUM: 2,
     Severity.LOW: 3,
     Severity.INFO: 4,
+    Severity.NEEDS_OPERATOR: 5,   # novel / unrated — sorts after everything rated
 }
+
+
+def _type_str(finding_type) -> str:
+    """The finding_type as a string, whether it's a FindingType enum or a raw
+    (novel, escape-hatch) str — `.value` would AttributeError on a str."""
+    return getattr(finding_type, "value", finding_type)
 
 
 def _counts_line(findings: Sequence[Finding]) -> str:
@@ -43,7 +50,7 @@ def assemble_report(
     of `secrets` as the final step.
     """
     ordered = sorted(
-        findings, key=lambda f: (_SEVERITY_RANK[f.severity()], f.finding_type.value)
+        findings, key=lambda f: (_SEVERITY_RANK[f.severity()], _type_str(f.finding_type))
     )
 
     lines: list[str] = [
@@ -71,7 +78,7 @@ def assemble_report(
         lines += [
             "",
             f"### [{finding.severity().value}] {finding.title}",
-            f"- **Type:** `{finding.finding_type.value}`",
+            f"- **Type:** `{_type_str(finding.finding_type)}`",
             f"- **Location:** {finding.location}",
             f"- **Evidence:** {finding.evidence}",
         ]

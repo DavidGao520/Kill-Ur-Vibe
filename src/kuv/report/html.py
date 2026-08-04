@@ -1,4 +1,4 @@
-"""Polished HTML report — matches the reference Acme PDF design.
+"""Polished, self-contained, print-friendly HTML report (Cmd-P → Save as PDF).
 
 Cover (dark navy + teal/blue accents, severity tiles) → Executive brief (decision
 callout, stat tiles, severity bar chart, prioritized action table) → Finding matrix
@@ -19,13 +19,15 @@ from .findings import Finding
 from .plain import Glosser, severity_plain, type_title
 from .redaction import redact_pii, redact_secrets
 
-_SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
+_SEV_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO,
+              Severity.NEEDS_OPERATOR]
 _SEV_CLASS = {
     Severity.CRITICAL: "crit",
     Severity.HIGH: "high",
     Severity.MEDIUM: "med",
     Severity.LOW: "low",
     Severity.INFO: "low",
+    Severity.NEEDS_OPERATOR: "low",
 }
 _SEV_PREFIX = {
     Severity.CRITICAL: "C",
@@ -33,6 +35,7 @@ _SEV_PREFIX = {
     Severity.MEDIUM: "M",
     Severity.LOW: "L",
     Severity.INFO: "I",
+    Severity.NEEDS_OPERATOR: "N",
 }
 
 _CSS = """
@@ -264,7 +267,8 @@ def assemble_html_report(
     secrets: Iterable[str] = (),
 ) -> str:
     secrets = tuple(secrets)
-    ordered = sorted(findings, key=lambda f: (_SEV_ORDER.index(f.severity()), f.finding_type.value))
+    ordered = sorted(findings, key=lambda f: (_SEV_ORDER.index(f.severity()),
+                                              getattr(f.finding_type, "value", f.finding_type)))
     counts = Counter(f.severity() for f in ordered)
     glosser = Glosser()   # explains each security term on FIRST use, once per report
 
@@ -314,14 +318,22 @@ def assemble_html_report(
 </section>"""
 
     # ---- exec brief ----
-    max_c = max([counts.get(s, 0) for s in _SEV_ORDER] + [1])
+    # Chart scale spans ONLY the severities actually drawn as bars — undrawn/unrated
+    # severities (NEEDS_OPERATOR) must not inflate the denominator and compress the rated
+    # bars. INFO is folded into the "Low / Info" bar so its label is honest. NEEDS_OPERATOR
+    # (novel/unrated) findings still appear in the matrix, cards, and prioritized table.
+    bar_specs = [
+        ("Critical", counts.get(Severity.CRITICAL, 0), _SEV_CLASS[Severity.CRITICAL]),
+        ("High", counts.get(Severity.HIGH, 0), _SEV_CLASS[Severity.HIGH]),
+        ("Medium", counts.get(Severity.MEDIUM, 0), _SEV_CLASS[Severity.MEDIUM]),
+        ("Low / Info", counts.get(Severity.LOW, 0) + counts.get(Severity.INFO, 0), _SEV_CLASS[Severity.LOW]),
+    ]
+    max_c = max([n for _, n, _ in bar_specs] + [1])
     bars = ""
-    for label, sev in [("Critical", Severity.CRITICAL), ("High", Severity.HIGH),
-                       ("Medium", Severity.MEDIUM), ("Low / Info", Severity.LOW)]:
-        n = counts.get(sev, 0)
+    for label, n, cls in bar_specs:
         pct = int(round(100 * n / max_c))
         bars += (f'<div class="bar"><div class="bl">{label}</div>'
-                 f'<div class="track"><div class="fill {_SEV_CLASS[sev]}" style="width:{pct}%"></div></div>'
+                 f'<div class="track"><div class="fill {cls}" style="width:{pct}%"></div></div>'
                  f'<div class="cn">{n}</div></div>')
 
     exec_tiles = "".join(

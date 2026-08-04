@@ -9,7 +9,7 @@ from typing import Callable
 # resolver(name, rrtype) -> list[str]; rrtype in {"A", "CNAME", "TXT"}. Empty on miss.
 Resolver = Callable[[str, str], list]
 
-# Common subdomains probed under an authorized apex (small, high-signal list).
+# Common subdomains probed under an authorized apex (small, high-signal, target-agnostic).
 SUBDOMAIN_WORDLIST: tuple[str, ...] = (
     "www", "app", "api", "dev", "staging", "test", "beta", "demo", "internal", "gateway",
     "metrics", "shop", "media", "blog", "docs", "portal", "dashboard", "careers", "vpn",

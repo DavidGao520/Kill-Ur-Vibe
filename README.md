@@ -9,9 +9,12 @@ happy path — and quietly skipped authorization. The bugs that actually hurt ar
 CVEs a scanner catches; they're **authorization-logic** holes:
 
 - an endpoint that returns *everyone's* data with no login,
+- a logged-in user who can read or change **another** user's records by changing an ID,
+- a signup form that quietly accepts `role=admin`,
 - open self-registration behind a cosmetic "invite only" gate,
 - a pre-signed upload URL anyone can write to,
-- a websocket that reads and writes production records without a token.
+- a websocket that reads and writes production records without a token,
+- a login token the server will accept even when it's forged.
 
 Kill-Ur-Vibe is an autonomous agent (bring your own Anthropic key) that probes an
 app **you own or are authorized to assess**, reasons about *who the server trusts*,
@@ -111,11 +114,19 @@ at the prompt to run purely read-only.
 
 ## Status
 
-Thin core is built and unit-tested (174 tests): egress policy engine + authorization
+Thin core is built and unit-tested (199 tests): egress policy engine + authorization
 scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
 scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, the keystone-gated
 headless-browser render probe, and the report generator. **Deferred:** none of the core
 probe classes — expansion only.
+
+The finding vocabulary is open: common authorization-bug classes (broken object-level
+access / IDOR, privilege-escalation, mass-assignment, forgeable tokens, SSRF, open-redirect)
+are first-class with deterministic severities, and a genuinely novel class the tool can't
+auto-rate is still recorded — flagged for operator triage, never silently dropped and never
+given an LLM-guessed severity. Generalization is measured on a held-out fixture suite
+(bug classes the method is taught for, on apps whose endpoints it has never seen), not
+on the one fixture it was built against.
 
 ## Stack
 

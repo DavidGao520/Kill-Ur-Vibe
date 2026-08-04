@@ -40,10 +40,10 @@ class _FakeClient:
         return self._resp
 
 
-def _session(*, is_fixture=True, resp: _FakeResp | None = None, resolver=None, targets=("app.example.com",)):
+def _session(*, is_fixture=True, resp: _FakeResp | None = None, resolver=None, targets=("ideas.example.com",)):
     scope = Scope(
-        engagement_id="acme",
-        authorized_by="operator@example.com",
+        engagement_id="example",
+        authorized_by="david@xante.dev",
         targets=targets,
         expires_at=date(2026, 12, 31),
         allowed_actions=frozenset({ActionClass.ACCOUNT_CREATE}),
@@ -56,7 +56,7 @@ def _session(*, is_fixture=True, resp: _FakeResp | None = None, resolver=None, t
 
 def test_get_in_scope_performs_request():
     session, client = _session()
-    out = asyncio.run(session.http_request("GET", "https://app.example.com/api/ideas"))
+    out = asyncio.run(session.http_request("GET", "https://ideas.example.com/api/ideas"))
     assert out["ok"] is True and out["status"] == 200
     assert len(client.calls) == 1
 
@@ -68,28 +68,28 @@ def test_get_off_scope_refused_and_no_io():
     assert client.calls == []  # the tool performed NO network I/O
 
 
+def test_write_to_fixture_allowed():
+    session, _ = _session(is_fixture=True)
+    out = asyncio.run(
+        session.http_request("POST", "https://ideas.example.com/api/ideas", '{"title":"x"}', ActionClass.ACCOUNT_CREATE)
+    )
+    assert out["ok"] is True
+
+
 def test_write_sets_content_type_header():
     # Regression: without a Content-Type, JSON write APIs reject with 415 / can't parse.
     session, client = _session(is_fixture=True)
     asyncio.run(session.http_request(
-        "POST", "https://app.example.com/api/users", '{"email":"x@y.invalid"}',
+        "POST", "https://ideas.example.com/v1/users", '{"email":"x@y.invalid"}',
         ActionClass.ACCOUNT_CREATE, content_type="application/json",
     ))
     assert client.last_headers == {"content-type": "application/json"}
 
 
-def test_write_to_fixture_allowed():
-    session, _ = _session(is_fixture=True)
-    out = asyncio.run(
-        session.http_request("POST", "https://app.example.com/api/ideas", '{"title":"x"}', ActionClass.ACCOUNT_CREATE)
-    )
-    assert out["ok"] is True
-
-
 def test_first_live_write_blocked_pending_confirmation():
     session, client = _session(is_fixture=False)
     out = asyncio.run(
-        session.http_request("POST", "https://app.example.com/api/ideas", '{"title":"x"}', ActionClass.ACCOUNT_CREATE)
+        session.http_request("POST", "https://ideas.example.com/api/ideas", '{"title":"x"}', ActionClass.ACCOUNT_CREATE)
     )
     assert out["ok"] is False and "CONFIRMATION" in out["error"]
     assert client.calls == []
@@ -102,9 +102,26 @@ def test_record_finding_assigns_severity_from_rules():
     assert len(session.findings) == 1
 
 
-def test_record_finding_rejects_invented_type():
+def test_record_finding_escape_hatch_accepts_novel_type():
+    # A genuinely novel class is recorded (never dropped), tagged for operator
+    # triage, and its severity is the fixed sentinel — never LLM-set.
     session, _ = _session()
-    out = session.record_finding("i_made_this_up", "x", "y", "z")
+    out = session.record_finding(
+        "graphql_batching_dos", "Novel finding", "POST /graphql",
+        "10 aliased mutations in one request all executed",
+        plain_impact="An attacker could multiply one request into many to overload the server.",
+    )
+    assert out["ok"] is True
+    assert out["severity"] == "Needs operator triage"
+    assert out.get("novel") is True
+    assert session.findings[-1].finding_type == "graphql_batching_dos"
+
+
+def test_record_finding_novel_requires_plain_impact():
+    # The hatch demands a plain-language summary — it's the operator's only human
+    # handle on an unrated class. Without it, refuse (don't record a mute novelty).
+    session, _ = _session()
+    out = session.record_finding("i_made_this_up", "x", "y", "z", plain_impact="")
     assert out["ok"] is False
     assert session.findings == []
 
@@ -112,7 +129,7 @@ def test_record_finding_rejects_invented_type():
 def test_decode_and_classify_are_passthrough():
     session, _ = _session()
     assert session.classify_secret("pk_live_abc")["is_public"] is True
-    assert session.classify_secret("sk_" "live_abc")["is_public"] is False
+    assert session.classify_secret("sk_live_abc")["is_public"] is False
 
 
 def test_record_finding_captures_rows_and_recommendation():
@@ -147,8 +164,8 @@ def test_parse_evidence_rows_degrades_on_garbage():
 # --- new tools: scan_js / enumerate_subdomains / check_email_auth ---------
 
 def test_scan_js_gated_and_returns_only_summary():
-    session, _ = _session(resp=_FakeResp(200, "x=sk_" "live_abcdef0123456789ABCDEF; y=2"))
-    out = asyncio.run(session.scan_js("https://app.example.com/app.js"))
+    session, _ = _session(resp=_FakeResp(200, "x=sk_live_abcdef0123456789ABCDEF; y=2"))
+    out = asyncio.run(session.scan_js("https://ideas.example.com/app.js"))
     assert out["ok"] is True
     assert any(s["type"] == "stripe_secret_key" for s in out["secrets"])
     assert "sk_live" not in str(out)  # only type/count/length, never the value
@@ -181,7 +198,7 @@ def test_enumerate_subdomains_flags_dns_only_dangling():
 
 
 def test_enumerate_subdomains_http_fingerprint_catches_resolving_dead_app():
-    # legacy-api RESOLVES (has an A record) but the Render app is gone — DNS alone
+    # gateway RESOLVES (has an A record) but the Render app is gone — DNS alone
     # would miss it; the gated HTTP GET returns a dead-app status/fingerprint.
     resolver = _dns({
         ("gateway.example.com", "A"): ["1.2.3.4"],

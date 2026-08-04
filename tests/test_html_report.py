@@ -30,10 +30,10 @@ def _findings():
 def _html():
     return assemble_html_report(
         _findings(),
-        target="app.example.com",
+        target="ideas.example.com",
         exec_brief="One Critical and one Medium.",
         decision_needed="Fix the /v1/search auth gap.",
-        prepared_for="Acme",
+        prepared_for="acme",
         date_str="2026-07-31",
     )
 
@@ -62,9 +62,9 @@ def test_html_redacts_pii_in_evidence():
 def test_header_never_emits_an_email():
     # Even the operator's own email passed as prepared_for must be redacted.
     html = assemble_html_report(
-        _findings(), target="t", exec_brief="x", prepared_for="operator@example.com", date_str="2026-08-03"
+        _findings(), target="t", exec_brief="x", prepared_for="david@xante.dev", date_str="2026-08-03"
     )
-    assert "operator@example.com" not in html
+    assert "david@xante.dev" not in html
 
 
 def test_html_renders_evidence_rows_as_table():
@@ -76,7 +76,7 @@ def test_html_renders_evidence_rows_as_table():
 def test_markdown_brief_is_rendered_not_literal():
     md = "## Assessment Summary\n\n**Scope:** unauth recon on `www.example.com`.\n\n- one\n- two"
     html = assemble_html_report(
-        _findings(), target="t", exec_brief=md, prepared_for="Acme", date_str="2026-08-02"
+        _findings(), target="t", exec_brief=md, prepared_for="acme", date_str="2026-08-02"
     )
     assert "<h4 class=\"md-h\">Assessment Summary</h4>" in html
     assert "<strong>Scope:</strong>" in html
@@ -94,7 +94,7 @@ def test_markdown_table_renders_as_html_table_not_pipes():
         "| 2 | Wildcard CORS | Medium |\n"
     )
     html = assemble_html_report(
-        _findings(), target="t", exec_brief=md, prepared_for="Acme", date_str="2026-08-03"
+        _findings(), target="t", exec_brief=md, prepared_for="acme", date_str="2026-08-03"
     )
     body = html.split("Executive Brief", 1)[1]
     assert "<th>Finding</th>" in body                      # header cell rendered
@@ -106,7 +106,7 @@ def test_markdown_table_renders_as_html_table_not_pipes():
 def test_decision_needed_is_derived_from_top_finding_when_absent():
     # Caller omits decision_needed -> it defaults to the top (most severe) fix.
     html = assemble_html_report(
-        _findings(), target="t", exec_brief="x", prepared_for="Acme", date_str="2026-08-03"
+        _findings(), target="t", exec_brief="x", prepared_for="acme", date_str="2026-08-03"
     )
     assert "Decision needed" in html
     assert "Add the missing auth check" in html            # from the Critical's recommendation
@@ -121,9 +121,25 @@ def test_no_decision_callout_when_only_low_severity():
 def test_cover_core_result_is_short_not_the_whole_brief():
     long_brief = "## Summary\n\nUNIQUEBRIEFTOKEN " + ("detail " * 80)
     html = assemble_html_report(
-        _findings(), target="t", exec_brief=long_brief, prepared_for="Acme", date_str="2026-08-02"
+        _findings(), target="t", exec_brief=long_brief, prepared_for="acme", date_str="2026-08-02"
     )
     cover_core = html.split('<p class="core">')[1].split("</p>")[0]
     assert "UNIQUEBRIEFTOKEN" not in cover_core       # cover is NOT the full dump
     assert "Top finding:" in cover_core                # derived short line
     assert "UNIQUEBRIEFTOKEN" in html                  # full brief still in the body
+
+
+def test_html_report_renders_novel_type_without_crashing():
+    """A novel str finding_type must not crash any HTML render path."""
+    f = Finding(
+        finding_type="graphql_batching_dos",
+        title="Novel finding",
+        location="POST /graphql",
+        evidence="e",
+        plain_impact="p",
+    )
+    html = assemble_html_report(
+        [f], target="example.com", exec_brief="x",
+        prepared_for="test", date_str="2026-08-03",
+    )
+    assert "Needs operator triage" in html

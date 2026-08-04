@@ -11,25 +11,25 @@ def _findings():
         Finding(
             FindingType.WEAK_TRANSPORT_OR_CORS,
             "Missing HSTS header",
-            "https://app.example.com",
+            "https://ideas.example.com",
             "no Strict-Transport-Security on the main document",
         ),
         Finding(
             FindingType.UNAUTH_WRITE,
             "Unauthenticated websocket save",
-            "wss://app.example.com/socket",
-            "created record 42 with no auth token",
+            "wss://ideas.example.com/socket",
+            "created a record with no auth token",
         ),
     ]
 
 
 def test_report_orders_critical_before_medium():
-    md = assemble_report(_findings(), exec_brief="brief", target="app.example.com")
+    md = assemble_report(_findings(), exec_brief="brief", target="ideas.example.com")
     assert md.index("Unauthenticated websocket save") < md.index("Missing HSTS header")
 
 
 def test_report_counts_and_severity_from_rules():
-    md = assemble_report(_findings(), exec_brief="brief", target="app.example.com")
+    md = assemble_report(_findings(), exec_brief="brief", target="ideas.example.com")
     assert "1 Critical · 1 Medium" in md
     assert "[Critical] Unauthenticated websocket save" in md
 
@@ -42,17 +42,17 @@ def test_exec_brief_is_included():
 # --- safety gate 3: redaction --------------------------------------------
 
 def test_redact_secrets_masks_value_and_keeps_length():
-    out = redact_secrets("token=sk_" "live_ABC123", ["sk_" "live_ABC123"])
-    assert "sk_" "live_ABC123" not in out
+    out = redact_secrets("token=sk_live_ABC123", ["sk_live_ABC123"])
+    assert "sk_live_ABC123" not in out
     assert "len=14" in out
 
 
 def test_report_never_emits_a_secret_value():
-    secret = "sk_" "live_DEADBEEFdeadbeef00"
+    secret = "sk_live_DEADBEEFdeadbeef00"
     finding = Finding(
         FindingType.OFF_ALLOWLIST_SECRET,
         "Leaked Stripe secret key",
-        "https://app.example.com/app.js",
+        "https://ideas.example.com/app.js",
         f"found {secret} in the bundle",  # simulate a slip-through in evidence
     )
     md = assemble_report([finding], exec_brief="x", target="t", secrets=[secret])
@@ -85,3 +85,21 @@ def test_report_never_emits_an_email_from_evidence():
     md = assemble_report([finding], exec_brief="x", target="t")
     assert "real.person@gmail.com" not in md
     assert "«email redacted»" in md
+
+
+def test_novel_string_type_renders_as_needs_operator():
+    """The escape hatch: a novel class recorded as a raw string renders as
+    'Needs operator triage' and preserves the proposed type for the operator."""
+    from kuv.severity import Severity
+
+    f = Finding(
+        finding_type="graphql_batching_dos",  # not in the enum
+        title="Novel: query batching amplification",
+        location="POST /graphql",
+        evidence="10 aliased mutations in one request all executed",
+        plain_impact="An attacker could multiply one request into many to overload the server.",
+    )
+    assert f.severity() is Severity.NEEDS_OPERATOR
+    out = assemble_report([f], exec_brief="x", target="example.com")
+    assert "Needs operator triage" in out
+    assert "graphql_batching_dos" in out  # the proposed type is preserved

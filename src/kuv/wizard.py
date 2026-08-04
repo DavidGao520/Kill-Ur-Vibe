@@ -58,6 +58,19 @@ def parse_target(raw: str) -> tuple[str, str, str]:
     return raw, host, apex
 
 
+def authorization_confirmed(answer: str) -> bool:
+    """One-tap authorization attestation. A bare Enter (or anything that is not an
+    explicit decline) confirms; only `no`/`n`/`cancel`/`q`/`quit` aborts. The
+    attestation stays — it is the operator's legal record — but it is one keypress,
+    not a typed word."""
+    return answer.strip().lower() not in ("no", "n", "cancel", "q", "quit")
+
+
+def writes_enabled(answer: str) -> bool:
+    """Synthetic-write tier is ON by default; only typing READ-ONLY disables it."""
+    return answer.strip().upper() != "READ-ONLY"
+
+
 def build_scope(host: str, apex: str, authorized_by: str, allow_writes: bool = False) -> Scope:
     """A one-year scope for an interactively-authorized target. Read-only by default;
     `allow_writes` opts into the gated synthetic-write classes (still per-class gated)."""
@@ -174,7 +187,9 @@ def main() -> int:
         f"   in the next step).\n"
         f"   Only proceed if you OWN this site or have written permission to test AND change it."
     )
-    if _ask("   Type 'yes' to confirm you are authorized: ").lower() != "yes":
+    if not authorization_confirmed(
+        _ask("   Press Enter to confirm you're authorized to test this site (or type 'no' to cancel): ")
+    ):
         print("Not confirmed — nothing was run.")
         return 1
 
@@ -189,7 +204,7 @@ def main() -> int:
         "   destructive — but a write can trigger real side effects (a welcome email, a\n"
         "   webhook, a Stripe customer)."
     )
-    allow_writes = _ask("   Press Enter to keep writes ON, or type 'READ-ONLY' to disable: ").strip().upper() != "READ-ONLY"
+    allow_writes = writes_enabled(_ask("   Press Enter to keep writes ON, or type 'READ-ONLY' to disable: "))
     print("   → " + ("Synthetic writes ON (tagged records only; each still per-class gated)."
                      if allow_writes else "Read-only — no writes will be made."))
 

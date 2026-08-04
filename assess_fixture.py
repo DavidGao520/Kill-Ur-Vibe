@@ -112,8 +112,11 @@ def main() -> int:
         print(f"EGRESS AUDIT: {len(result.audit)} gated requests")
         print(f"BUDGET: {result.budget.requests_used}/{result.budget.max_requests} tool-calls, "
               f"{result.budget.elapsed:.0f}s")
-        crit = any(f.severity().value == "Critical" for f in result.findings)
-        print(f"ASSIGNMENT: {'PASS — reproduced a Critical' if crit else 'no Critical reproduced'}")
+        # PASS gate is recall against ground truth (not the old self-referential "any
+        # Critical appeared") — the agent must reproduce the known findings, not just
+        # emit *something* severe. Generalization across bug classes is eval/suite.py.
+        passed = fidelity["recall"] == 1.0 and not fidelity["extra"]
+        print(f"ASSIGNMENT: {'PASS — reproduced ground truth (recall=1.0, no extras)' if passed else 'FAIL — see missed/extra above'}")
         return 0
     finally:
         server.terminate()

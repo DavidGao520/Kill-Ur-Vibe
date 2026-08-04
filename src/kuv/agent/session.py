@@ -156,15 +156,24 @@ class AssessmentSession:
         plain_impact: str = "",
     ) -> dict:
         try:
-            ft = FindingType(finding_type)
+            ft: FindingType | str = FindingType(finding_type)
+            novel = False
         except ValueError:
-            return {
-                "ok": False,
-                "error": (
-                    f"unrecognized finding_type {finding_type!r}; do not invent one — "
-                    f"use one of {[f.value for f in FindingType]}"
-                ),
-            }
+            # Escape hatch: a genuinely novel class with no rule. Record it (never
+            # drop it) and tag it for operator triage — the severity becomes the
+            # fixed NEEDS_OPERATOR sentinel, never an LLM guess. Require plain_impact:
+            # it is the operator's only plain-language handle on an unrated class.
+            if not str(plain_impact).strip():
+                return {
+                    "ok": False,
+                    "error": (
+                        f"novel finding_type {finding_type!r} requires plain_impact — it is "
+                        f"the operator's only plain-language summary for triage. (Prefer one "
+                        f"of {[f.value for f in FindingType]} if any fits.)"
+                    ),
+                }
+            ft = str(finding_type)
+            novel = True
         rows = tuple(
             (str(p), str(r)) for p, r in evidence_rows if p is not None
         )
@@ -179,11 +188,21 @@ class AssessmentSession:
             plain_impact=plain_impact,
         )
         self.findings.append(finding)
-        return {"ok": True, "severity": finding.severity().value, "priority": finding.priority()}
+        result = {"ok": True, "severity": finding.severity().value, "priority": finding.priority()}
+        if novel:
+            result["novel"] = True
+        return result
 
     def decode_jwt(self, token: str) -> dict:
         result = decode_jwt_role(token)
-        return {"role": result.role.value, "is_finding": result.is_finding}
+        return {
+            "role": result.role.value,
+            "is_finding": result.is_finding,
+            "alg": result.alg,
+            # alg=none/empty → the server would accept an unsigned token → file
+            # a `jwt_forgeable` finding (Critical) if you PROVE the server honors it.
+            "forgeable": result.forgeable,
+        }
 
     def classify_secret(self, token: str) -> dict:
         result = classify_secret_prefix(token)

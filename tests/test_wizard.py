@@ -7,7 +7,7 @@ from datetime import date
 import pytest
 
 from kuv.gate import ActionClass
-from kuv.wizard import build_scope, parse_target
+from kuv.wizard import authorization_confirmed, build_scope, parse_target, writes_enabled
 
 
 def test_parse_bare_domain():
@@ -41,3 +41,22 @@ def test_build_scope_is_readonly_and_authorized():
     # scope enforcement still works off this
     assert scope.host_in_scope("api.example.com") is True
     assert scope.host_in_scope("evil.com") is False
+
+
+def test_authorization_confirmed_is_one_tap():
+    # Attestation kept but frictionless: a bare Enter (or anything not an explicit
+    # decline) confirms; only an explicit "no"/cancel aborts.
+    assert authorization_confirmed("") is True
+    assert authorization_confirmed("yes") is True
+    assert authorization_confirmed("  Y ") is True
+    assert authorization_confirmed("no") is False
+    assert authorization_confirmed("n") is False
+    assert authorization_confirmed("cancel") is False
+
+
+def test_writes_on_by_default_opt_out_with_read_only():
+    # Write tier stays ON by default; only typing READ-ONLY disables it.
+    assert writes_enabled("") is True            # Enter keeps writes ON
+    assert writes_enabled("anything") is True
+    assert writes_enabled("READ-ONLY") is False
+    assert writes_enabled("read-only") is False

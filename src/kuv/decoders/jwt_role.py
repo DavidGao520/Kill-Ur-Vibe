@@ -28,6 +28,8 @@ class JwtRoleResult:
     role: JwtRole
     is_finding: bool          # True only for SERVICE_ROLE (a real exposure)
     raw_role: str | None      # the exact `role` claim string, if present
+    alg: str | None = None    # the header `alg`, if the header decoded
+    forgeable: bool = False    # alg=none / empty → unsigned token accepted → jwt_forgeable
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -52,13 +54,22 @@ def decode_jwt_role(token: str) -> JwtRoleResult:
     if not isinstance(payload, dict):
         return JwtRoleResult(JwtRole.INVALID, False, None)
 
+    # Header `alg`: alg=none (or empty) means an unsigned token the server accepts —
+    # anyone can forge any identity. Deterministic, not an eyeball call.
+    try:
+        header = json.loads(_b64url_decode(parts[0]))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        header = {}
+    alg = header.get("alg") if isinstance(header, dict) else None
+    forgeable = isinstance(alg, str) and alg.strip().lower() in ("none", "")
+
     raw = payload.get("role")
     if not isinstance(raw, str):
-        return JwtRoleResult(JwtRole.UNKNOWN, False, None)
+        return JwtRoleResult(JwtRole.UNKNOWN, False, None, alg, forgeable)
     if raw == "service_role":
-        return JwtRoleResult(JwtRole.SERVICE_ROLE, True, raw)
+        return JwtRoleResult(JwtRole.SERVICE_ROLE, True, raw, alg, forgeable)
     if raw == "authenticated":
-        return JwtRoleResult(JwtRole.AUTHENTICATED, False, raw)
+        return JwtRoleResult(JwtRole.AUTHENTICATED, False, raw, alg, forgeable)
     if raw == "anon":
-        return JwtRoleResult(JwtRole.ANON, False, raw)
-    return JwtRoleResult(JwtRole.UNKNOWN, False, raw)
+        return JwtRoleResult(JwtRole.ANON, False, raw, alg, forgeable)
+    return JwtRoleResult(JwtRole.UNKNOWN, False, raw, alg, forgeable)

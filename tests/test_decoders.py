@@ -1,7 +1,7 @@
 """Unit tests for the deterministic decoders.
 
 These are the safety-critical "the LLM must not be wrong here" checks from
-the design notes §Fidelity eval & safety acceptance gates (decoder correctness).
+DESIGN-active-cli.md §Fidelity eval & safety acceptance gates (decoder correctness).
 """
 
 from __future__ import annotations
@@ -59,6 +59,24 @@ def test_non_jwt_is_invalid_not_a_crash():
     assert decode_jwt_role("a.!!!bad-base64!!!.c").role is JwtRole.INVALID
 
 
+def test_jwt_alg_none_is_forgeable():
+    # alg=none means the server accepts an unsigned token → anyone can forge any
+    # identity. Deterministic header check, not an LLM judgement.
+    def seg(obj: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    tok = ".".join([seg({"alg": "none", "typ": "JWT"}), seg({"role": "authenticated"}), ""])
+    res = decode_jwt_role(tok)
+    assert res.alg == "none"
+    assert res.forgeable is True
+
+
+def test_jwt_signed_alg_not_forgeable():
+    res = decode_jwt_role(_jwt({"role": "anon"}))   # _jwt uses alg=HS256
+    assert res.alg == "HS256"
+    assert res.forgeable is False
+
+
 # --- source map -----------------------------------------------------------
 
 _VALID_MAP = json.dumps({"version": 3, "sources": ["a.ts"], "mappings": "AAAA"})
@@ -99,17 +117,17 @@ def test_publishable_key_is_public():
 
 
 def test_secret_key_is_not_public():
-    res = classify_secret_prefix("sk_" "live_abc123def456")
+    res = classify_secret_prefix("sk_live_abc123def456")
     assert res.is_public is False
     assert res.matched_prefix is None
 
 
 def test_aws_access_key_is_not_public():
-    assert classify_secret_prefix("AKIAIOS" "FODNN7EXAMPLE").is_public is False
+    assert classify_secret_prefix("AKIAIOSFODNN7EXAMPLE").is_public is False
 
 
 def test_result_carries_no_secret_material():
-    res = classify_secret_prefix("sk_" "live_super_secret_value")
+    res = classify_secret_prefix("sk_live_super_secret_value")
     # length only, never the value itself (redaction discipline).
-    assert res.length == len("sk_" "live_super_secret_value")
+    assert res.length == len("sk_live_super_secret_value")
     assert "secret" not in repr(res)

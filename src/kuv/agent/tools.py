@@ -80,13 +80,17 @@ def build_network_server(session: AssessmentSession):
 
     @tool(
         "record_finding",
-        f"Record a PROVEN finding. finding_type must be one of: {_TYPES}. Severity is "
-        f"assigned deterministically by the tool, not by you. `evidence` is a one-line "
-        f"summary; `evidence_json` is a JSON array of [probe, result] pairs (the exact "
-        f"requests you sent and the responses that proved it); `recommendation` is the fix. "
-        f"`plain_impact` is REQUIRED: one or two sentences in PLAIN language (no jargon, no "
-        f"acronyms) telling a non-technical founder what could actually go wrong and who is "
-        f"harmed — calibrated to severity, never dramatized. It is the first line they read.",
+        f"Record a PROVEN finding. finding_type SHOULD be one of: {_TYPES}. Severity is "
+        f"assigned deterministically by the tool, not by you. If — and ONLY if — no listed "
+        f"type fits a genuinely novel class you PROVED, pass your own short snake_case type: "
+        f"it is recorded for operator triage (severity 'Needs operator triage' — you still do "
+        f"NOT set severity). Prefer the closest listed type; never use this hatch to dodge "
+        f"type discipline. `evidence` is a one-line summary; `evidence_json` is a JSON array of "
+        f"[probe, result] pairs (the exact requests you sent and the responses that proved it); "
+        f"`recommendation` is the fix. `plain_impact` is REQUIRED (doubly so for a novel type — "
+        f"it is the operator's only human handle): one or two sentences in PLAIN language (no "
+        f"jargon, no acronyms) telling a non-technical founder what could actually go wrong and "
+        f"who is harmed — calibrated to severity, never dramatized. It is the first line they read.",
         {
             "finding_type": str,
             "title": str,

@@ -9,7 +9,9 @@ from kuv.severity import FindingType, Severity, priority_for, severity_for
 
 @dataclass(frozen=True)
 class Finding:
-    finding_type: FindingType
+    # A FindingType for a known class, OR a raw snake_case str for a genuinely novel
+    # class recorded via the escape hatch (then severity() is the NEEDS_OPERATOR sentinel).
+    finding_type: FindingType | str
     title: str
     location: str                       # URL / surface where it was proven
     evidence: str                       # human-readable; must not embed raw secrets
@@ -22,6 +24,9 @@ class Finding:
     plain_impact: str = ""
 
     def severity(self) -> Severity:
+        if not isinstance(self.finding_type, FindingType):
+            # A novel class recorded via the escape hatch — never LLM-severitied.
+            return Severity.NEEDS_OPERATOR
         return severity_for(
             self.finding_type, contains_pii_or_secrets=self.contains_pii_or_secrets
         )
