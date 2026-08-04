@@ -12,11 +12,14 @@ against the installed claude-agent-sdk version; adjust here if the SDK differs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
+from urllib.parse import urlparse
 
 import httpx
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
 
 from kuv.egress import EgressEngine, RunBudget
+from kuv.egress.ssrf import _default_resolve, pinned_async_client
 from kuv.gate import ActionClass, Scope
 from kuv.report import Finding
 
@@ -52,6 +55,29 @@ async def _gate_hook(input_data, tool_use_id, context):
             ),
         }
     }
+
+
+def _scan_host(target: str, scope: Scope) -> str:
+    """The host to pin: the target URL's host, falling back to the scope's first target."""
+    host = urlparse(target).hostname
+    if host:
+        return host
+    return scope.targets[0] if scope.targets else ""
+
+
+def build_scan_client(
+    scope: Scope,
+    target: str,
+    *,
+    resolve: Callable[[str], list[str]] = _default_resolve,
+) -> httpx.AsyncClient:
+    """The HTTP client for a run. A live (non-fixture) scan gets a client pinned to the scan
+    host — the host is resolved once, verified public, and every connection is forced to that
+    IP (anti-DNS-rebinding). Fixtures (loopback) keep the plain client and are exempt from the
+    pin. Raises `SsrfError` if a live host is, or resolves to, a non-public IP."""
+    if scope.is_fixture:
+        return httpx.AsyncClient(follow_redirects=False, timeout=15.0)
+    return pinned_async_client(_scan_host(target, scope), resolve=resolve)
 
 
 @dataclass
@@ -98,7 +124,7 @@ async def run_assessment(
     for action in confirm_actions:
         if action in scope.allowed_actions:      # never confirm a class the scope did not allow
             engine.confirm(action)
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
+    async with build_scan_client(scope, target) as client:
         session = AssessmentSession(engine, client)
         server = build_network_server(session)
         options = ClaudeAgentOptions(
