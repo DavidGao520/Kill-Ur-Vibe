@@ -34,6 +34,7 @@ TOOL_NAMES = (
     "mcp__kuvnet__analyze_oauth",
     "mcp__kuvnet__check_tls",
     "mcp__kuvnet__discover_paths",
+    "mcp__kuvnet__render_page",
 )
 
 
@@ -216,6 +217,22 @@ def build_network_server(session: AssessmentSession):
             args["url"], bool(args.get("probe_wordlist", False))
         ))
 
+    @tool(
+        "render_page",
+        "Render a JS single-page app in a headless browser and report its REAL runtime "
+        "traffic — the XHR/fetch API endpoints it actually calls (its true backend origin, "
+        "even when that origin is a different host you'd then add to scope), the routes its "
+        "client-side router builds, and in-scope websocket frames. Use this when a static "
+        "http_get/discover_paths only returns an app shell and the real API/websocket lives "
+        "in runtime JS. EVERY browser request is egress-gated: off-scope ones are blocked "
+        "before they're sent and reported under off_scope_hosts_discovered (so you learn the "
+        "backend origin without contacting it); in a read-only run the page's own writes are "
+        "blocked too. Values-free (query strings stripped, ws frames summarized).",
+        {"url": str},
+    )
+    async def render_page_tool(args):
+        return _wrap(await session.render_page(args["url"]))
+
     return create_sdk_mcp_server(
         SERVER_NAME,
         "0.1.0",
@@ -234,5 +251,6 @@ def build_network_server(session: AssessmentSession):
             analyze_oauth_tool,
             check_tls_tool,
             discover_paths_tool,
+            render_page_tool,
         ],
     )

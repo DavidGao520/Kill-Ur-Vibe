@@ -17,6 +17,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 pdf = ["playwright>=1.44"]   # optional: automatic HTML->PDF (else a headless Chrome is used)
 probe = ["websockets>=12"]     # optional: the live websocket probe (TLS uses stdlib ssl)
+browser = ["playwright>=1.48"] # optional: the headless-browser render_page probe
 
 [project.scripts]
 kuv = "kuv.wizard:main"

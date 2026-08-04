@@ -27,11 +27,13 @@ from kuv.recon.dns import (
     is_takeover,
     takeover_suffix,
 )
+from kuv.recon.browser import BrowserProbe, mask_tokens, playwright_probe, redact_path, redact_url
 from kuv.recon.dns import enumerate_subdomains as _dns_enumerate
 from kuv.recon.paths import PATH_WORDLIST, extract_paths, extract_scripts, rank_paths
 from kuv.recon.tls import TlsProbe, ssl_tls_probe
 from kuv.recon.websocket import WsProbe, flags_sensitive, summarize_fields, websockets_probe
 from kuv.report import Finding
+from kuv.report.redaction import redact_pii
 from kuv.scanners import scan_secrets
 from kuv.severity import FindingType
 
@@ -105,12 +107,14 @@ class AssessmentSession:
         resolver: Resolver | None = None,
         ws_probe: WsProbe | None = None,
         tls_probe: TlsProbe | None = None,
+        browser_probe: BrowserProbe | None = None,
     ) -> None:
         self.engine = engine
         self.client = client
         self.resolver: Resolver = resolver or dnspython_resolver
         self.ws_probe: WsProbe = ws_probe or websockets_probe
         self.tls_probe: TlsProbe = tls_probe or ssl_tls_probe
+        self.browser_probe: BrowserProbe = browser_probe or playwright_probe
         self.findings: list[Finding] = []
 
     async def http_request(
@@ -424,6 +428,72 @@ class AssessmentSession:
             "paths": [{"path": p, "source": source.get(p, "?")} for p in ranked[:cap]],
             "bundles_scanned": bundles,
             "probed": probed,
+        }
+
+    async def render_page(self, url: str) -> dict:
+        """Render a JS SPA in a headless browser and report its REAL runtime traffic —
+        the XHR/fetch endpoints it calls (its true API origin, even when that origin is
+        off-scope and therefore never contacted), the routes its client-side router builds,
+        and any in-scope websocket frames. EVERY request the page makes is run through the
+        egress gate: off-scope requests are aborted before they leave and reported as
+        'discovered but blocked' (so you learn the API origin without touching it); in a
+        read-only run the page's own writes/telemetry are blocked too. Values-free:
+        query strings are stripped and websocket frames are summarized, never dumped."""
+        host = _host_of(url)
+        allowed, reason = self.engine.check_host(host, kind="browser")
+        if not allowed:
+            return {"ok": False, "error": f"REFUSED: {reason}"}
+
+        def gate(method: str, req_url: str) -> tuple[bool, str]:
+            verdict = self.engine.evaluate(EgressRequest(method.upper(), req_url))
+            return (verdict.decision is Decision.ALLOW, verdict.reason)
+
+        result = await self.browser_probe(url, gate=gate, timeout=20.0, max_requests=45)
+        if not result.ok:
+            return {"ok": False, "error": result.error or "browser probe failed"}
+
+        def red_url(u: str) -> str:                  # host + token-redacted path, no query
+            return redact_pii(redact_url(u))
+
+        def red_txt(s: str) -> str:                  # mask secret-shaped tokens + emails
+            return redact_pii(mask_tokens(s))
+
+        api = [
+            {"method": r.method, "url": red_url(r.url), "host": r.host,
+             "status": r.status, "allowed": r.allowed}
+            for r in result.requests if r.resource_type in ("xhr", "fetch")
+        ]
+        # Hosts the app tried to reach but the gate blocked as off-scope — i.e. the real
+        # backend/API origins to consider adding to scope for a follow-up.
+        off_scope_hosts = sorted({
+            r.host for r in result.requests
+            if not r.allowed and r.host and "scope" in r.reason.lower()
+        })
+        blocked_writes = sorted({
+            f"{r.method} {red_url(r.url)}" for r in result.requests
+            if not r.allowed and r.method.upper() not in ("GET", "HEAD", "OPTIONS")
+        })
+        websockets = [
+            {"url": red_url(w.url), "host": w.host, "allowed": w.allowed,
+             "field_summary": summarize_fields(w.messages), "sensitive_fields": flags_sensitive(summarize_fields(w.messages))}
+            for w in result.websockets
+        ]
+        rendered_paths = [
+            redact_pii(redact_path(p))
+            for p in rank_paths(extract_paths(result.rendered_html, self.engine.in_scope))
+        ]
+
+        return {
+            "ok": True,
+            "url": url,
+            "title": red_txt(result.title),
+            "api_calls": api[:80],
+            "off_scope_hosts_discovered": off_scope_hosts,
+            "blocked_writes": blocked_writes[:40],
+            "websockets": websockets,
+            "rendered_paths": [{"path": p} for p in rendered_paths[:120]],
+            "console_errors": [red_txt(e) for e in result.console_errors[:20]],
+            "requests_seen": len(result.requests),
         }
 
     def check_tls(self, host: str) -> dict:

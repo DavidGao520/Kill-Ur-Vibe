@@ -93,7 +93,12 @@ object stores / pre-signed signers, OAuth, third-party hosts) and library finger
 Use `discover_paths(url)` to pull the route/endpoint list straight out of the page + its JS
 bundles (SPA router tables live in the bundle — that is where routes like `/account/login`
 and `/events` hide); add `probe_wordlist=true` to also probe common/sensitive paths
-(`/admin`, `/api`, `/.env`, `/.git/config`). Then `http_get` the interesting routes.
+(`/admin`, `/api`, `/.env`, `/.git/config`). If `http_get`/`discover_paths` return only an
+app SHELL (a client-rendered SPA) and the real API/websocket lives in runtime JS, use
+`render_page(url)` — it renders the app in a headless browser and reports the XHR/fetch
+endpoints it actually calls (its true backend origin, even an off-scope one named under
+`off_scope_hosts_discovered` without contacting it), its client-side routes, and in-scope
+websocket frames. Then `http_get` the interesting routes.
 
 **Phase 2 — SHIPPED-JS & SECRET REVIEW.** For each candidate secret call the public-prefix
 decoder (public-by-design → suppress; off-allowlist → escalate); for any JWT call the
@@ -177,7 +182,11 @@ optionally probe a curated path wordlist — the surface map, run this early in 
 values-free field summary — the ONLY way to reach the unauth-websocket finding classes),
 `check_http_posture(url)` (deterministic CSP/cookie/CORS/HSTS gap list),
 `analyze_oauth(authorize_url)` (deterministic OAuth state/PKCE/hd gap list),
-`check_tls(host)` (deterministic cert validity/expiry/hostname/protocol gap list).
+`check_tls(host)` (deterministic cert validity/expiry/hostname/protocol gap list),
+`render_page(url)` (headless-browser render of a JS SPA — reports the real XHR/fetch API
+endpoints, the true backend origin even when off-scope, client-side routes, and in-scope
+websocket frames; every browser request is egress-gated). Use it when a static fetch only
+returns an app shell.
 
 Breadth checklist — do NOT stop at the first host:
 1. `enumerate_subdomains(apex)` → probe EACH live host it returns. A `dangling=true` result
