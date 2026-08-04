@@ -71,6 +71,13 @@ def test_severity_plain_covers_every_severity():
         assert sev in SEVERITY_PLAIN and severity_plain(sev)
 
 
+def test_info_disclosure_is_low_not_high():
+    from kuv.severity import severity_for
+    # a non-sensitive status/ops endpoint gets the honest Low bucket, not an inflated High
+    assert severity_for(FindingType.INFO_DISCLOSURE) is Severity.LOW
+    assert type_title(FindingType.INFO_DISCLOSURE)          # has a human title
+
+
 # ---- report integration ----
 
 def _finding(sev_type=FindingType.UNAUTH_READ_SENSITIVE, **kw):

@@ -29,6 +29,7 @@ class FindingType(str, Enum):
     INSECURE_TLS = "insecure_tls"                        # expired/self-signed/mismatch/obsolete
     SUBDOMAIN_TAKEOVER = "subdomain_takeover"            # dangling CNAME to a claimable service
     EMAIL_SPOOFING = "email_spoofing"                    # DMARC p=none / unset
+    INFO_DISCLOSURE = "info_disclosure"                  # unauth NON-sensitive internals (status/health/version)
 
 
 class NeedsOperatorSeverity(Exception):
@@ -56,6 +57,10 @@ _STATIC: dict[FindingType, Severity] = {
     FindingType.SUBDOMAIN_TAKEOVER: Severity.HIGH,
     # Unenforced DMARC lets anyone spoof your domain in email — real but indirect.
     FindingType.EMAIL_SPOOFING: Severity.MEDIUM,
+    # An unauth endpoint leaking NON-sensitive internals (status/health/version/job names,
+    # counts, timestamps) — recon value only, no data/PII/secret. The honest low bucket, so
+    # the agent stops inflating such things into unauth_read_sensitive.
+    FindingType.INFO_DISCLOSURE: Severity.LOW,
 }
 
 # Priority bucket = impact-over-effort ordering, keyed off the assigned severity.

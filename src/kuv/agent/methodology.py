@@ -201,6 +201,12 @@ Breadth checklist — do NOT stop at the first host:
 When you call `record_finding`, produce report-grade structure:
 - `location` as "METHOD /path"; `evidence` = a one-line summary; `evidence_json` = a JSON
   array of `[probe, result]` pairs; `recommendation` = the concrete server-side fix.
+- **finding_type discipline — do NOT inflate.** `unauth_read_sensitive` is ONLY for an
+  endpoint returning real user/customer/business DATA, PII, or secrets to an unauthenticated
+  caller. A health/status/metrics/version/ops endpoint exposing NON-sensitive internals (job
+  names, counts, timestamps, uptime) is `info_disclosure` (**Low**), NOT
+  `unauth_read_sensitive` — picking the wrong type silently inflates severity and makes the
+  report cry wolf. When unsure, pick the LOWER-impact type.
 - `plain_impact` = **REQUIRED**. One or two sentences in PLAIN language — NO jargon, NO
   acronyms — telling a non-technical founder what could actually go wrong and who gets hurt
   if this isn't fixed. It is the FIRST line they read. Calibrate to severity, never

@@ -109,7 +109,7 @@ at the prompt to run purely read-only.
 
 ## Status
 
-Thin core is built and unit-tested (173 tests): egress policy engine + authorization
+Thin core is built and unit-tested (174 tests): egress policy engine + authorization
 scope, deterministic decoders + severity rules, the Claude Agent SDK harness, the secret
 scanner, DNS recon, the websocket / HTTP-posture / OAuth / TLS probes, the keystone-gated
 headless-browser render probe, and the report generator. **Deferred:** none of the core

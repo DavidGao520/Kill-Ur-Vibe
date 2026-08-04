@@ -27,6 +27,7 @@ TYPE_TITLES: dict[FindingType, str] = {
     FindingType.INSECURE_TLS: "The site's HTTPS certificate is invalid or weak",
     FindingType.SUBDOMAIN_TAKEOVER: "An abandoned subdomain could be hijacked by an attacker",
     FindingType.EMAIL_SPOOFING: "Anyone can send email pretending to be your domain",
+    FindingType.INFO_DISCLOSURE: "A status/health endpoint exposes non-sensitive internals publicly",
 }
 
 # One plain sentence per severity — what it means for the reader's calendar.
