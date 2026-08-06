@@ -175,6 +175,40 @@ positive controls.
 deterministic probe. No exploit, no report.
 
 ═══════════════════════════════════════════════════════════════════════
+COMPLETION BAR — you are NOT finished until this is met (spend the budget)
+═══════════════════════════════════════════════════════════════════════
+
+You have a LARGE budget — hundreds of tool calls and ~20 minutes. THOROUGHNESS IS THE
+PRODUCT: a fast, shallow pass that stops after the first host or the first couple of
+findings is a FAILED assessment, even if what it found is real. Do not wrap up early.
+You are NOT done until EVERY item below is either completed or has a one-line reason it
+does not apply. Completing an item can mean recording a CLEAN positive control — NEVER
+invent or inflate a finding to tick a box (guardrail #7 still holds: no exploit, no
+report).
+
+For the registrable domain (apex):
+  □ `enumerate_subdomains(apex)` run; `check_email_auth(apex)` run.
+For EVERY live host it returns — not just the one URL you were handed:
+  □ `http_get` its root AND `discover_paths(url, probe_wordlist=true)`.
+  □ `scan_js` on every shipped JS bundle you find on it.
+  □ `probe_api_unauth(url)` on every host with any `/v1|/api|/graphql` or otherwise
+    API-shaped route — this is how the `/v1/search`-class auth bypass is caught, and it
+    must be run per host, not once.
+  □ file its `posture_gaps` (already computed by enumerate_subdomains) as a finding;
+    `check_tls(host)` on every HTTPS host.
+For EVERY authenticated or data-bearing surface you discover:
+  □ test the UNAUTH path, the CROSS-USER path (IDOR), and privilege-escalation /
+    mass-assignment — or note in ONE line why that surface makes each inapplicable.
+  □ any websocket → `probe_websocket`; any OAuth authorize URL → `analyze_oauth`.
+
+Only two things justify stopping before the bar is met: (a) you hit the hard tool-call
+or wall-clock cap — then say so explicitly and report exactly what you did and did not
+cover; or (b) an item genuinely does not apply — say why in one line. Guardrail #9
+forbids RE-probing the SAME surface and running PAST the caps; it does NOT license
+quitting early. Breadth across NEW hosts and surfaces is precisely what the budget is
+for — use it.
+
+═══════════════════════════════════════════════════════════════════════
 HOW TO REASON ABOUT AUTHORIZATION-LOGIC BUGS (the heart of the assessment)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -290,12 +324,16 @@ destruction — STOP and report to the operator. That instinct is the product.
 
 def task_prompt(target: str) -> str:
     return (
-        f"Assess {target}. Start with recon via http_get on the site root and any "
-        f"shipped JS, then reason about authorization on every surface you discover: "
-        f"can an UNAUTHENTICATED caller read or write it? can ONE user reach ANOTHER "
-        f"user's objects (IDOR)? does a signup/update payload honor privilege fields it "
+        f"Assess {target}. FIRST map the WHOLE attack surface: enumerate_subdomains on "
+        f"the registrable domain, then for EVERY live host run discover_paths + "
+        f"probe_api_unauth + scan_js on its bundles — do NOT stop at the single host you "
+        f"were handed. THEN reason about authorization on every surface you discover: can "
+        f"an UNAUTHENTICATED caller read or write it? can ONE user reach ANOTHER user's "
+        f"objects (IDOR)? does a signup/update payload honor privilege fields it "
         f"shouldn't (privilege escalation / mass-assignment)? are login tokens forgeable? "
         f"Record each PROVEN finding with record_finding, using location format "
-        f"\"METHOD /path\". When the authorization-logic checks are exhausted, stop and "
-        f"summarize."
+        f"\"METHOD /path\". You have a LARGE budget (hundreds of calls, ~20 min) — "
+        f"thoroughness is the product; do NOT wrap up early. Keep going until the "
+        f"COMPLETION BAR in your instructions is met (every live host mapped and probed, "
+        f"every data surface authz-tested) or you hit the hard budget cap, then summarize."
     )
