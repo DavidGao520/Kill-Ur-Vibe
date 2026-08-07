@@ -4,8 +4,21 @@ The egress engine's scope check is a hostname string match; when the scope is bu
 from user input (e.g. a hosted web front-end), that authorizes whatever the user types,
 including `127.0.0.1`, `192.168.x`, `169.254.169.254`, Tailscale `100.64/10`, `localhost`.
 This module resolves the target and blocks any non-public address so a live (non-fixture)
-scan cannot be steered at internal/loopback/metadata hosts. Connection-time IP pinning
-(`pinned_async_client`) closes the DNS-rebinding gap between resolve and connect.
+scan cannot be steered at internal/loopback/metadata hosts.
+
+`host_ip_safety` alone is only an EVALUATE-time check, and every path that reached the
+network re-resolved the hostname when it actually connected — a second, independent lookup
+the attacker also controls (DNS rebinding). Closing that gap takes a pin per connect path,
+because there is no single socket layer underneath them:
+
+  HTTP              `pinned_async_client` — swaps httpcore's network backend
+  TLS / websocket   `connect_pinned` — injected as `kuv.recon.connect.Connect`
+  headless browser  `kuv.egress.proxy.PinningProxy` — Chromium resolves in its own C++
+                    stack, so the only way to pin it is to make it use a proxy we own
+
+`kuv.agent.spine.build_scan_transport` builds all three off ONE `PinnedHost` per run.
+In every case only the TCP destination changes: TLS SNI and certificate verification stay
+bound to the hostname, so pinning never weakens verification.
 """
 
 from __future__ import annotations
@@ -100,7 +113,7 @@ def _pin_ip(host: str, resolve: Callable[[str], list[str]]) -> str:
     return resolved[0]                        # every address is public here → any is safe
 
 
-class _PinnedHost:
+class PinnedHost:
     """The scan host resolved once to a verified-public IP. `target_ip` returns that pinned
     IP for the pinned host (a rebind cannot land — we never re-resolve it); any other host
     reached at connect time is re-verified public and refused otherwise."""
@@ -116,12 +129,35 @@ class _PinnedHost:
         return _pin_ip(host, self._resolve)      # sibling/other host: verify + pin at connect
 
 
+def connect_pinned(
+    pin: PinnedHost,
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    connect: Callable[..., object] | None = None,
+) -> object:
+    """Open a TCP socket to `host` at its PINNED IP — never a fresh DNS lookup.
+
+    The stdlib's `socket.create_connection((host, port))` resolves the hostname itself, so
+    every probe that called it re-opened the rebinding window the pin exists to close. This
+    is the one connector every non-httpx probe (TLS, websocket) dials through: the pinned
+    host always goes to its pinned IP, and any OTHER host is resolved once and verified
+    public here, raising `SsrfError` if it is not. `connect` is injected for tests.
+    """
+    ip = pin.target_ip(host)          # raises SsrfError if the host is non-public
+    # Looked up at CALL time, not captured as a default: a module-level default would bind
+    # the stdlib function at import and make this seam impossible to intercept in a test.
+    connect = connect or socket.create_connection
+    return connect((ip, port), timeout)
+
+
 class _PinnedBackend(httpcore.AsyncNetworkBackend):
     """httpcore network backend that rewrites the TCP destination to the pinned IP, then
     delegates to the real backend. Only the connect target changes — TLS SNI/cert stay the
     hostname (httpcore derives `server_hostname` from the untouched URL host)."""
 
-    def __init__(self, pin: _PinnedHost, inner: httpcore.AsyncNetworkBackend):
+    def __init__(self, pin: PinnedHost, inner: httpcore.AsyncNetworkBackend):
         self._pin = pin
         self._inner = inner
 
@@ -141,7 +177,7 @@ class _PinnedBackend(httpcore.AsyncNetworkBackend):
 class _PinnedHTTPTransport(httpx.AsyncHTTPTransport):
     """An `AsyncHTTPTransport` whose connection pool connects only to the pinned IP."""
 
-    def __init__(self, pin: _PinnedHost, **kwargs):
+    def __init__(self, pin: PinnedHost, **kwargs):
         super().__init__(**kwargs)
         self._pool._network_backend = _PinnedBackend(pin, self._pool._network_backend)
 
@@ -157,7 +193,7 @@ def pinned_async_client(
     """An `httpx.AsyncClient` pinned to `host` for the whole scan: `host` is resolved once and
     verified public (raising `SsrfError` if not), and every connection to it is forced to that
     pinned IP — closing the DNS-rebinding window while keeping TLS SNI/cert = the hostname."""
-    pin = _PinnedHost(host, resolve=resolve)
+    pin = PinnedHost(host, resolve=resolve)
     transport = _PinnedHTTPTransport(pin)
     return httpx.AsyncClient(
         transport=transport, timeout=timeout, follow_redirects=follow_redirects, **client_kwargs

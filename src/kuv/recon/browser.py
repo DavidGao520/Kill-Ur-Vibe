@@ -147,10 +147,22 @@ _NEUTER_WEBSOCKET = "try{window.WebSocket=function(){throw new Error('blocked');
 
 
 async def playwright_probe(
-    url: str, *, gate: Gate, timeout: float = 20.0, max_requests: int = 45
+    url: str,
+    *,
+    gate: Gate,
+    timeout: float = 20.0,
+    max_requests: int = 45,
+    proxy_url: str | None = None,
 ) -> BrowserResult:
     """Production probe (lazy-imports Playwright). Renders `url` in a fresh, cookie-less
-    headless context; every HTTP request is gated (off-scope → aborted, recorded)."""
+    headless context; every HTTP request is gated (off-scope → aborted, recorded).
+
+    `proxy_url` points Chromium at the loopback pinning proxy. Chromium resolves DNS in its
+    own C++ stack, which no Python-side pin can reach and `--host-resolver-rules` cannot
+    cover for hosts discovered mid-render — so the proxy is what stops a rebound in-scope
+    subdomain from reaching an internal address. It also means Chromium performs no DNS at
+    all, which retires the preconnect DNS/SNI leak noted below. Omitted for fixtures, whose
+    loopback targets the pin would refuse outright."""
     import asyncio
 
     try:
@@ -172,12 +184,18 @@ async def playwright_probe(
             # Curb Chrome's connection prediction (dns-prefetch / speculative preconnect open
             # a socket with no HTTP request, which request routing can't intercept). Residual:
             # an EXPLICIT <link rel=preconnect href=off-scope> may still open a TCP+TLS socket
-            # (a DNS + SNI metadata leak — never an HTTP payload/secret). Documented, not fully
-            # closable via flags.
-            browser = await pw.chromium.launch(headless=True, args=[
+            # (a DNS + SNI metadata leak — never an HTTP payload/secret), and a `proxy_url`
+            # run does NOT close that: the proxy checks the destination IP, not scope, so a
+            # speculative socket to an off-scope PUBLIC host still opens. What the proxy does
+            # remove is the dangerous half — a speculative socket can no longer land on an
+            # internal address. Closing the rest needs the scope gate inside the proxy.
+            launch_args: dict = {"headless": True, "args": [
                 "--dns-prefetch-disable",
                 "--disable-features=NetworkPrediction,PreconnectToSearch,Prerender2",
-            ])
+            ]}
+            if proxy_url:
+                launch_args["proxy"] = {"server": proxy_url}
+            browser = await pw.chromium.launch(**launch_args)
             try:
                 # Block service workers (they can fetch outside the page's routing) and
                 # downloads; neuter WebRTC (a data channel routing can't see).

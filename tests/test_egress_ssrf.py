@@ -11,7 +11,7 @@ import pytest
 from kuv.egress.ssrf import (
     SsrfError,
     _PinnedBackend,
-    _PinnedHost,
+    PinnedHost,
     _PinnedHTTPTransport,
     host_ip_safety,
     pinned_async_client,
@@ -119,7 +119,7 @@ def test_pinned_client_keeps_tls_verification_on():
 
 def test_pin_resolves_once_and_holds_public_ip_across_rebind():
     resolve = _rebinding(["93.184.216.34"], ["127.0.0.1"])  # public at pin time, rebinds to loopback
-    pin = _PinnedHost("example.com", resolve=resolve)
+    pin = PinnedHost("example.com", resolve=resolve)
     assert pin.ip == "93.184.216.34"
     # a later connection for the pinned host still targets the pinned public IP...
     assert pin.target_ip("example.com") == "93.184.216.34"
@@ -130,7 +130,7 @@ def test_pin_resolves_once_and_holds_public_ip_across_rebind():
 
 def test_backend_connects_to_pinned_ip_not_hostname_after_rebind():
     resolve = _rebinding(["93.184.216.34"], ["127.0.0.1"])
-    pin = _PinnedHost("example.com", resolve=resolve)
+    pin = PinnedHost("example.com", resolve=resolve)
     inner = _RecordingBackend()
     backend = _PinnedBackend(pin, inner)
     asyncio.run(backend.connect_tcp("example.com", 443))
@@ -141,7 +141,7 @@ def test_backend_connects_to_pinned_ip_not_hostname_after_rebind():
 def test_backend_refuses_nonpinned_host_that_resolves_private():
     # A different host reached at connect time (e.g. a sibling) is re-verified, and refused
     # if it is non-public — no connection is attempted.
-    pin = _PinnedHost(
+    pin = PinnedHost(
         "example.com",
         resolve=_res({"example.com": ["93.184.216.34"], "sibling.internal": ["10.0.0.9"]}),
     )

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -27,8 +28,19 @@ from claude_agent_sdk import (
 )
 
 from kuv.egress import EgressEngine, RunBudget
-from kuv.egress.ssrf import _default_resolve, pinned_async_client
+from kuv.egress.proxy import PinningProxy
+from kuv.egress.ssrf import (
+    PinnedHost,
+    SsrfError,
+    _default_resolve,
+    connect_pinned,
+    pinned_async_client,
+)
 from kuv.gate import ActionClass, Scope
+from kuv.recon.browser import BrowserProbe, playwright_probe
+from kuv.recon.connect import Connect
+from kuv.recon.tls import TlsProbe, ssl_tls_probe
+from kuv.recon.websocket import WsProbe, websockets_probe
 from kuv.report import Finding
 
 from .methodology import METHODOLOGY_SYSTEM_PROMPT, task_prompt
@@ -88,6 +100,86 @@ def build_scan_client(
     return pinned_async_client(_scan_host(target, scope), resolve=resolve)
 
 
+@dataclass(frozen=True)
+class ScanTransport:
+    """Everything a run uses to reach the network, all sharing ONE pin.
+
+    The HTTP client is not the only thing that opens sockets: the TLS and websocket probes
+    open their own, and each used to re-resolve the hostname (reopening the DNS-rebinding
+    window). `connect`/`tls_probe`/`ws_probe` are the pinned replacements. The browser gets
+    `proxy` instead, because Chromium resolves DNS in its own C++ stack where no injected
+    connector reaches. All are `None` for a fixture scope, where the probes fall back to
+    their plain defaults — pinning a loopback fixture would refuse it outright.
+
+    Use as an async context manager: it starts the proxy, holds the client open, and shuts
+    both down together, so the browser's proxy URL is only ever live while the run is.
+    """
+
+    client: httpx.AsyncClient
+    connect: Connect | None = None
+    tls_probe: TlsProbe | None = None
+    ws_probe: WsProbe | None = None
+    proxy: PinningProxy | None = None
+
+    @property
+    def browser_probe(self) -> BrowserProbe | None:
+        """The browser probe bound to this run's proxy, or None to keep the plain default."""
+        if self.proxy is None:
+            return None
+        return partial(playwright_probe, proxy_url=self.proxy.url)
+
+    async def __aenter__(self) -> "ScanTransport":
+        if self.proxy is not None:
+            await self.proxy.start()
+        try:
+            await self.client.__aenter__()
+        except BaseException:
+            if self.proxy is not None:   # never leave a listening proxy behind
+                await self.proxy.close()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        try:
+            await self.client.__aexit__(*exc_info)
+        finally:
+            if self.proxy is not None:
+                await self.proxy.close()
+
+
+def build_scan_transport(
+    scope: Scope,
+    target: str,
+    *,
+    resolve: Callable[[str], list[str]] = _default_resolve,
+) -> ScanTransport:
+    """The pinned network surface for one run. The scan host is resolved once and verified
+    public; every socket — HTTP, TLS handshake, websocket — is then forced to that IP, and
+    any OTHER host reached mid-scan is resolved once and verified public at connect time.
+    Raises `SsrfError` if the live scan host is, or resolves to, a non-public IP."""
+    client = build_scan_client(scope, target, resolve=resolve)
+    if scope.is_fixture:
+        return ScanTransport(client=client)
+
+    pin = PinnedHost(_scan_host(target, scope), resolve=resolve)
+
+    def connect(host: str, port: int, timeout: float):
+        # Probes report OSError as data; SsrfError is a ValueError and would sail past their
+        # `except OSError` and abort the whole assessment over one blocked host. Translate.
+        try:
+            return connect_pinned(pin, host, port, timeout)
+        except SsrfError as exc:
+            raise OSError(f"SSRF pin refused {host}: {exc}") from exc
+
+    return ScanTransport(
+        client=client,
+        connect=connect,
+        tls_probe=partial(ssl_tls_probe, connect=connect),
+        ws_probe=partial(websockets_probe, connect=connect),
+        proxy=PinningProxy(pin),
+    )
+
+
 @dataclass
 class AssessmentResult:
     findings: list[Finding]
@@ -133,7 +225,6 @@ async def run_assessment(
     for action in confirm_actions:
         if action in scope.allowed_actions:      # never confirm a class the scope did not allow
             engine.confirm(action)
-
     def _emit(evt: dict) -> None:
         if on_event is not None:
             on_event(evt)
@@ -141,8 +232,14 @@ async def run_assessment(
     def _short(name: str) -> str:
         return name.rsplit("__", 1)[-1] if name else name
 
-    async with build_scan_client(scope, target) as client:
-        session = AssessmentSession(engine, client, on_event=on_event)
+    async with build_scan_transport(scope, target) as transport:
+        # The pinned probes go in with the client: a pin the session never receives is a pin
+        # that does nothing, since the probes would fall back to re-resolving defaults.
+        client = transport.client
+        session = AssessmentSession(
+            engine, client, tls_probe=transport.tls_probe, ws_probe=transport.ws_probe,
+            browser_probe=transport.browser_probe, on_event=on_event,
+        )
         server = build_network_server(session)
         options = ClaudeAgentOptions(
             model=model,

@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .connect import Connect, default_connect
+
 
 @dataclass(frozen=True)
 class WsFrame:
@@ -143,14 +145,18 @@ async def websockets_probe(
     send: tuple[str, ...],
     recv_timeout: float,
     max_messages: int,
+    connect: Connect | None = None,
 ) -> WsFrame:
-    """Production probe (lazy-imports `websockets`). PINS the connection to the URL's
-    host by opening the socket ourselves — the library then refuses any cross-origin
-    handshake redirect, so the probe can only ever reach the host the caller gated.
-    Connects with NO cookies and the given Origin; any failure is returned as data."""
+    """Production probe (lazy-imports `websockets`). Opens the socket ourselves so the
+    library REFUSES any cross-origin handshake redirect — the probe can only ever reach the
+    host the caller gated. `connect` dials that socket; pass a pinned connector to also hold
+    the connection to an already-verified IP (anti-DNS-rebinding), since the default resolves
+    the hostname afresh. Connects with NO cookies and the given Origin; any failure is
+    returned as data."""
     import asyncio
-    import socket
     from urllib.parse import urlparse
+
+    connect = connect or default_connect
 
     try:
         import websockets
@@ -166,9 +172,7 @@ async def websockets_probe(
 
     loop = asyncio.get_event_loop()
     try:
-        sock = await loop.run_in_executor(
-            None, lambda: socket.create_connection((host, port), timeout=recv_timeout)
-        )
+        sock = await loop.run_in_executor(None, lambda: connect(host, port, recv_timeout))
     except OSError as exc:
         return WsFrame(False, 0, origin, (), error=f"connect failed: {exc}"[:200])
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from .connect import Connect, default_connect
+
 
 @dataclass(frozen=True)
 class TlsResult:
@@ -116,9 +118,8 @@ def _lower_minimum_version(ctx) -> None:
         pass
 
 
-def _negotiated_protocol(host: str, port: int, timeout: float) -> str | None:
+def _negotiated_protocol(host: str, port: int, timeout: float, connect: Connect) -> str | None:
     """Protocol version from an UNVERIFIED handshake (works even for a bad cert)."""
-    import socket
     import ssl
 
     ctx = ssl.create_default_context()
@@ -126,17 +127,24 @@ def _negotiated_protocol(host: str, port: int, timeout: float) -> str | None:
     ctx.verify_mode = ssl.CERT_NONE
     _lower_minimum_version(ctx)
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with connect(host, port, timeout) as sock:
+            # server_hostname stays the HOSTNAME even when the socket dialed a pinned IP,
+            # so SNI is correct and the cert is validated against the name, not the address.
             with ctx.wrap_socket(sock, server_hostname=host) as ss:
                 return ss.version()
     except Exception:  # noqa: BLE001
         return None
 
 
-def ssl_tls_probe(host: str, *, port: int = 443, timeout: float = 8.0) -> TlsResult:
-    """Production TLS prober (stdlib only)."""
+def ssl_tls_probe(
+    host: str, *, port: int = 443, timeout: float = 8.0, connect: Connect | None = None
+) -> TlsResult:
+    """Production TLS prober (stdlib only). `connect` dials the socket — pass a pinned
+    connector to keep the handshake on an already-verified IP (anti-DNS-rebinding)."""
     import socket
     import ssl
+
+    connect = connect or default_connect
 
     valid_chain = True
     hostname_match = True
@@ -150,7 +158,7 @@ def ssl_tls_probe(host: str, *, port: int = 443, timeout: float = 8.0) -> TlsRes
     if not has_trust:
         # No CA roots anywhere → chain validity is NOT assessable in this environment.
         # Do NOT false-positive `insecure_tls`; report reachability + protocol only.
-        proto = _negotiated_protocol(host, port, timeout)
+        proto = _negotiated_protocol(host, port, timeout, connect)
         return TlsResult(
             reachable=proto is not None, valid_chain=True, hostname_match=True,
             expired=False, self_signed=False, days_to_expiry=None, protocol=proto,
@@ -162,7 +170,9 @@ def ssl_tls_probe(host: str, *, port: int = 443, timeout: float = 8.0) -> TlsRes
     try:
         # Verify the cert/hostname while ALLOWING legacy protocols, so an old TLS version
         # is not misreported as a cert-chain failure — protocol is judged separately.
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with connect(host, port, timeout) as sock:
+            # SNI + cert verification stay bound to the HOSTNAME even when the socket was
+            # dialed at a pinned IP — pinning never weakens verification.
             with ctx.wrap_socket(sock, server_hostname=host) as ss:
                 protocol = ss.version()
                 cert = ss.getpeercert() or {}
@@ -188,7 +198,7 @@ def ssl_tls_probe(host: str, *, port: int = 443, timeout: float = 8.0) -> TlsRes
         )
 
     if protocol is None:
-        protocol = _negotiated_protocol(host, port, timeout)
+        protocol = _negotiated_protocol(host, port, timeout, connect)
     return TlsResult(
         reachable=True,
         valid_chain=valid_chain,
