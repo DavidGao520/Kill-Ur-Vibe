@@ -1,75 +1,85 @@
-"""Detect an API that mass-assigns client-supplied privileged fields it should ignore.
+"""Detect an API that mass-assigns and PERSISTS client-supplied fields it should control.
 
 The classic vibe-coded flaw is ``db.insert(req.body)`` / ``new User(req.body)`` — the
 handler shovels the *entire* request body into the record instead of allow-listing the
 few fields a client is allowed to set. When it does, a caller can smuggle in
 ``role="admin"``, ``is_admin=true``, ``credits=999999`` or ``plan="enterprise"`` on an
-ordinary create/update and have the server store them. This probe looks for evidence of the
-flaw the only way a single identity can — POST a benign synthetic object, then POST it again
-with a fixed catalog of privileged fields injected, and see whether the response **echoes an
-injected field back with the value we injected** that the baseline did NOT already return.
-An echo is a *necessary* signal, not proof of storage: it cannot, from one identity, tell a
-stored-and-unintended field (the real vuln) apart from one that was merely reflected back or
-one that is legitimately client-settable. See HONEST LIMITATIONS below.
+ordinary create/update and have the server **store** them.
+
+An *echo* alone does not prove that flaw. The single commonest schemaless / NoSQL shape is
+an echo-create — ``res.json({...req.body, id})`` — which reflects the posted body straight
+back for acknowledgement while storing nothing extra. From one request that endpoint is
+indistinguishable from a real mass-assignment: the baseline body carries no ``role``, the
+injected body echoes ``role="admin"``, and a probe that stops at the echo fires a false
+positive. **Echo is reflection, not storage.** This probe therefore crosses a second,
+independent hop before it emits anything:
+
+  1. POST a benign synthetic baseline object, then POST the same object with the fixed
+     privileged-field catalog injected; compute the differential — an injected field
+     echoed back with the injected value that the baseline did NOT already return (this
+     kills server-default and server-controlled-echo cases).
+  2. Parse the created record's id out of the injected response and issue a SECOND,
+     INDEPENDENT ``GET <endpoint>/<id>``. A differential field qualifies as a finding ONLY
+     if the read-back record still carries it with the injected value. No id, a read-back
+     that is refused / 4xx / non-JSON, or the field absent on read-back -> the field is
+     treated as reflected-not-stored and produces NOTHING.
+
+Three tiers, and this probe only ever reaches the middle one:
+
+  * echo but storage UNPROVEN  -> emit nothing.
+  * storage PROVEN via read-back -> one ``mass_assignment`` finding (severity HIGH is
+    assigned downstream by the fixed table, never here), carrying an explicit hedge that a
+    stored field is not proven to *govern* authorization.
+  * storage AND authorization-impact proven -> ``privilege_escalation`` (CRITICAL). Proving
+    that a stored ``role``/``admin`` field is actually honored needs a two-identity scan and
+    is OUT OF SCOPE for this single-identity probe. **This probe therefore NEVER emits
+    ``privilege_escalation``** — a persisted ``role="admin"`` is reported as
+    ``mass_assignment`` with the not-proven-to-govern-authorization hedge.
 
 This is a WRITE probe. Safety / blast-radius properties (why it is legitimate to run
 against a third party's production, and how the damage is bounded):
 
 * **Pure and I/O-free.** This module does NO network, disk, or shell. Every request goes
-  through the INJECTED ``post`` callable (gated egress), exactly like
+  through the INJECTED ``request`` callable (gated egress), exactly like
   ``probe_webhook_sig(post, …)`` / ``run_templated_checks(fetch, …)``.
 * **Side effect on the target: it creates (at most) two synthetic records per endpoint** —
   one benign baseline, one carrying the injected fields. Both use synthetic marker names
   (``name``/``title`` = ``"kuvprobe"``) and NON-EXISTENT owner ids (``owner_id``/``user_id``
-  = ``"0"``), so the injected write cannot attach to or mutate a real user's data.
-* **Bounded by ``cap``.** At most ``cap`` POSTs total across all endpoints (two per
-  endpoint), so the number of synthetic rows created is hard-capped.
-* **Differential, to kill false positives.** A field is flagged only if the injected
-  response echoes it with the injected value AND the baseline response (which never
-  carried that field) did NOT already return the same value. That suppresses the case
-  where the server *always* sets the field itself (a server default), and the case where
-  the server echoes the field back with its own value (e.g. ``role`` → ``"user"``).
+  = ``"0"``), so the injected write cannot attach to or mutate a real user's data. These
+  ``kuvprobe`` rows PERSIST on the target — kuv performs no DELETE, so the operator must
+  purge them. The read-back GET is a read and creates nothing.
+* **Bounded by ``cap``.** ``cap`` bounds the number of POSTs (writes) across all endpoints
+  (two per endpoint), so the number of synthetic rows created is hard-capped. The read-back
+  GET issued only for a differential endpoint is a read and is not charged against ``cap``.
+* **Differential, to kill false positives.** A field is considered only if the injected
+  response echoes it with the injected value AND the baseline response (which never carried
+  that field) did NOT already return the same value. That suppresses the case where the
+  server *always* sets the field itself (a server default) and the case where the server
+  echoes the field back with its own value (e.g. ``role`` → ``"user"``).
+* **Read-back, to kill the echo-without-storage false positive.** A differential field is
+  emitted only if a second, independent ``GET <endpoint>/<id>`` shows the field persisted
+  with the injected value. An echo-create that reflects the body without storing it
+  produces the differential but fails the read-back, so it emits nothing.
 * **Zero false positives from SPA catch-alls.** A vibe-coded SPA answers ``200`` + its
-  HTML shell for any path; an HTML-document body is REJECTED. A 2xx generic
+  HTML shell for any path; an HTML-document body is REJECTED at every hop. A 2xx generic
   acknowledgement with no object echo (``{"ok": true}``) matches nothing and is not a
-  finding. Only a JSON body that echoes an injected field with the injected value counts.
+  finding.
 * **Value-free evidence.** Evidence carries the status and the injected field *names*
-  only — never response values, PII, or fetched content. The injected values are our own
-  synthetic constants, not the target's data.
+  only — never response values, the target's record id, PII, or fetched content. The
+  injected values are our own synthetic constants, not the target's data.
 
-HONEST LIMITATIONS — an echo is single-identity evidence, and single-identity evidence is
-two-sided (both a false-negative and a false-positive vector):
-
-* **False NEGATIVE (no echo).** This detects only the case where the API **echoes** the
-  accepted field back in its create/update response. An endpoint that *silently* accepts and
-  stores a privileged field without echoing it is reported as clean here, not as vulnerable.
-* **False POSITIVE (echo without storage).** Symmetrically, an echo does NOT prove the
-  server *persisted* the field. A confirmation/echo create endpoint that reflects the posted
-  body back for acknowledgement — without storing the privileged fields — produces the exact
-  same differential (the baseline body carries no ``role``; the injected body echoes
-  ``role="admin"``) and is flagged even though nothing was stored. The differential kills
-  server-default and server-controlled echoes, but from one identity it cannot separate
-  "stored" from "merely reflected".
-* **False POSITIVE (stored but legitimately client-settable).** Some catalog fields are
-  frequently *meant* to be chosen by the client and stored — most notably ``plan`` /
-  ``subscription_tier`` on a signup/subscription create endpoint (the client picks a plan,
-  the server stores + echoes it, and billing is enforced separately), and to a lesser degree
-  ``owner_id`` / ``user_id``. A benign server that stores and echoes the client's chosen
-  ``plan="enterprise"`` yields a ``mass_assignment`` finding. Because this module assigns no
-  severity or confidence (finding_type only) and the catalog is spec-fixed, that benign case
-  cannot be suppressed inside the module or downstream: a ``mass_assignment`` finding on
-  ``plan`` / ``subscription_tier`` / ``owner_id`` / ``user_id`` REQUIRES a human to confirm
-  the field is not intentionally client-settable before it is treated as a defect.
-
-The sound disambiguation for BOTH false-positive vectors is the SAME two-identity read-back
-that resolves the false negative — create the record carrying the injected field as one
-identity, then read it back as a second identity. That proves the field was persisted AND is
-visible cross-identity, which neither a reflect-without-store endpoint nor a per-client
-legitimate field would satisfy. It is a future Wave-2b capability this probe does not attempt.
+HONEST LIMITATION that survives the read-back: proving a field is *stored and cross-visible*
+is not the same as proving it *governs* authorization or billing. A benign server may store
+and echo a client-chosen ``plan="enterprise"`` (billing enforced separately) or persist a
+``role`` string an authorization layer never consults. So a ``mass_assignment`` finding here
+means "the server accepted, persisted, and re-served a field a client should not be able to
+set" — it does NOT assert privilege escalation. That last hop (does the stored field change
+what the account can DO, proven across two identities) is a future Wave-2b capability this
+probe does not attempt, which is exactly why it never emits ``privilege_escalation``.
 
 The module never imports :mod:`kuv.severity` and never decides a severity — it emits a
-plain ``finding_type`` string (``"privilege_escalation"`` or ``"mass_assignment"``); the
-deterministic severity table maps it downstream.
+plain ``finding_type`` string (always ``"mass_assignment"`` now); the deterministic
+severity table maps it to HIGH downstream.
 """
 
 from __future__ import annotations
@@ -114,14 +124,10 @@ DEFAULT_ENDPOINTS: tuple[str, ...] = (
 # the injected privileged-field catalog + how each is matched in a response
 # --------------------------------------------------------------------------
 
-_PRIVILEGE = True  # role / admin / permission fields  -> "privilege_escalation"
-_MASS = False      # everything else                    -> "mass_assignment"
-
 
 @dataclass(frozen=True)
 class _Field:
     name: str
-    is_privilege: bool
     kind: str          # "bool" | "str" | "num" | "list_admin"
     expected: Any      # the injected value (for str/num); ignored for bool/list_admin
 
@@ -143,23 +149,25 @@ class _Field:
         return False
 
 
-# Fixed catalog. Privilege/role fields first, then the broader mass-assignment set.
+# Fixed catalog. role/admin/permission fields are included, but — unlike earlier revisions
+# of this probe — they no longer route to a separate privilege_escalation finding: a stored
+# role/admin field is reported as mass_assignment with the not-proven-to-govern-authz hedge.
 _CATALOG: tuple[_Field, ...] = (
-    _Field("role", _PRIVILEGE, "str", "admin"),
-    _Field("is_admin", _PRIVILEGE, "bool", True),
-    _Field("isAdmin", _PRIVILEGE, "bool", True),
-    _Field("admin", _PRIVILEGE, "bool", True),
-    _Field("is_superuser", _PRIVILEGE, "bool", True),
-    _Field("permissions", _PRIVILEGE, "list_admin", None),
-    _Field("credits", _MASS, "num", 999999),
-    _Field("balance", _MASS, "num", 999999),
-    _Field("is_verified", _MASS, "bool", True),
-    _Field("email_verified", _MASS, "bool", True),
-    _Field("verified", _MASS, "bool", True),
-    _Field("plan", _MASS, "str", "enterprise"),
-    _Field("subscription_tier", _MASS, "str", "enterprise"),
-    _Field("owner_id", _MASS, "str", "0"),
-    _Field("user_id", _MASS, "str", "0"),
+    _Field("role", "str", "admin"),
+    _Field("is_admin", "bool", True),
+    _Field("isAdmin", "bool", True),
+    _Field("admin", "bool", True),
+    _Field("is_superuser", "bool", True),
+    _Field("permissions", "list_admin", None),
+    _Field("credits", "num", 999999),
+    _Field("balance", "num", 999999),
+    _Field("is_verified", "bool", True),
+    _Field("email_verified", "bool", True),
+    _Field("verified", "bool", True),
+    _Field("plan", "str", "enterprise"),
+    _Field("subscription_tier", "str", "enterprise"),
+    _Field("owner_id", "str", "0"),
+    _Field("user_id", "str", "0"),
 )
 
 # The synthetic marker written into the benign fields of every probe object.
@@ -181,7 +189,13 @@ for _f in _CATALOG:
 # Deterministic, byte-stable serialization (mirrors webhook_sig.PROBE_BODY).
 BASELINE_BODY: str = json.dumps(_BASELINE_OBJ, sort_keys=True, separators=(",", ":"))
 INJECTED_BODY: str = json.dumps(_INJECTED_OBJ, sort_keys=True, separators=(",", ":"))
+# Content-type the caller's `request` wrapper should send for the POST hops. The callable
+# signature is request(method, path, body); headers are the wrapper's concern, not ours.
 PROBE_HEADERS: dict = {"content-type": "application/json"}
+
+# Keys under which a created record's id is commonly returned (top-level or nested).
+_ID_KEYS: tuple[str, ...] = ("id", "_id", "uuid", "guid", "pk")
+_ID_WRAPPERS: tuple[str, ...] = ("data", "object")
 
 # --------------------------------------------------------------------------
 # matchers / helpers
@@ -234,20 +248,57 @@ def _collect_pairs(obj: Any, out: Optional[list], depth: int = 0) -> list:
     return out
 
 
+def _id_str(v: Any) -> Optional[str]:
+    """Coerce a candidate id value to a non-empty string, or ``None`` if it is not a
+    plain scalar id (bool/None/container are rejected)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        return v or None
+    if isinstance(v, int):
+        return str(v)
+    return None
+
+
+def _extract_id(obj: Any) -> Optional[str]:
+    """Pull a created record's id out of the injected response for the read-back GET.
+
+    Looks for ``id`` / ``_id`` / ``uuid`` / ``guid`` / ``pk`` at the top level first, then
+    the same keys nested one level under ``data`` / ``object`` (``data.id`` / ``object.id``,
+    the common wrapped shapes). Returns the id as a string, or ``None`` if none is present.
+    """
+    if not isinstance(obj, dict):
+        return None
+    for k in _ID_KEYS:
+        if k in obj:
+            s = _id_str(obj[k])
+            if s is not None:
+                return s
+    for wrapper in _ID_WRAPPERS:
+        inner = obj.get(wrapper)
+        if isinstance(inner, dict):
+            for k in _ID_KEYS:
+                if k in inner:
+                    s = _id_str(inner[k])
+                    if s is not None:
+                        return s
+    return None
+
+
 def _field_present_with_injected_value(field: _Field, pairs: list) -> bool:
     """True iff some ``(key, value)`` in ``pairs`` has ``key == field.name`` (exact) and a
     value equal to what we injected."""
     return any(k == field.name and field.matches(v) for k, v in pairs)
 
 
-def _accepted_fields(status: Any, body: Any, baseline_obj: Optional[Any]) -> list[_Field]:
+def _differential_fields(status: Any, inj_obj: Any, baseline_obj: Optional[Any]) -> list[_Field]:
     """Return the catalog fields the injected response **echoes** with the injected value.
 
-    A field qualifies iff: the injected response is a 2xx JSON body (not HTML) that echoes
-    the field with the injected value, AND the baseline response (which never carried that
-    field) did NOT already return the same value (server default / server-controlled echo).
-    An echo is a *necessary* signal, not proof of storage — see the module HONEST LIMITATIONS
-    (reflect-without-store, and legitimately client-settable fields such as plan).
+    A field qualifies iff: the injected response is a 2xx JSON body (already parsed into
+    ``inj_obj``, ``None`` for HTML/non-JSON) that echoes the field with the injected value,
+    AND the baseline response (which never carried that field) did NOT already return the
+    same value (server default / server-controlled echo). This is a *necessary* signal, not
+    proof of storage — the caller must confirm each field via the independent read-back.
     """
     try:
         code = int(status)
@@ -255,10 +306,9 @@ def _accepted_fields(status: Any, body: Any, baseline_obj: Optional[Any]) -> lis
         return []
     if not (200 <= code < 300):
         return []
-    obj = _parse_json(body)
-    if obj is None:
+    if inj_obj is None:
         return []
-    resp_pairs = _collect_pairs(obj, None)
+    resp_pairs = _collect_pairs(inj_obj, None)
     base_pairs = _collect_pairs(baseline_obj, None) if baseline_obj is not None else []
 
     accepted: list[_Field] = []
@@ -266,7 +316,7 @@ def _accepted_fields(status: Any, body: Any, baseline_obj: Optional[Any]) -> lis
         if not _field_present_with_injected_value(field, resp_pairs):
             continue
         # Differential: if the baseline already returned this value, it is a server
-        # default / server-controlled — NOT attacker-controlled. Do not flag.
+        # default / server-controlled — NOT attacker-controlled. Do not consider.
         if baseline_obj is not None and _field_present_with_injected_value(field, base_pairs):
             continue
         accepted.append(field)
@@ -274,59 +324,51 @@ def _accepted_fields(status: Any, body: Any, baseline_obj: Optional[Any]) -> lis
 
 
 # --------------------------------------------------------------------------
-# finding copy (two variants: privilege escalation vs. general mass assignment)
+# finding copy  (single variant: mass assignment, storage proven via read-back)
 # --------------------------------------------------------------------------
 
-_PRIV_TITLE = "API mass-assigns client-supplied privilege fields (privilege escalation)"
-_PRIV_RECOMMENDATION = (
-    "Never pass the raw request body into your data layer (db.insert(req.body) / new "
-    "User(req.body)). Allow-list exactly the fields a client may set and drop everything "
-    "else; set role, admin, superuser and permission fields ONLY from server-side logic, "
-    "never from client input."
-)
-_PRIV_PLAIN_IMPACT = (
-    "When creating or updating an object, a user can grant themselves elevated privileges "
-    "just by adding an extra field to the request — for example setting their own role to "
-    "admin or turning on a superuser flag. That is a direct path to taking over "
-    "administrative control of the app."
-)
-
-_MASS_TITLE = "API mass-assigns client-supplied fields it should control server-side"
+_MASS_TITLE = "API mass-assigns and stores client-supplied fields it should control server-side"
 _MASS_RECOMMENDATION = (
     "Allow-list the fields a client is permitted to set and ignore the rest; never spread "
-    "the whole request body into the record. Fields like balance, credits, verified "
-    "status, plan/tier and record ownership must be set server-side only, never accepted "
-    "from client input. Triage note: an echo shows the field was reflected, not necessarily "
-    "persisted; and plan / subscription_tier / owner_id / user_id are sometimes intentionally "
-    "client-settable. Confirm the field is genuinely stored and not meant to be client-set "
-    "(ideally via a two-identity read-back) before treating this as a defect."
+    "the whole request body into the record. Fields like role/admin flags, balance, credits, "
+    "verified status, plan/tier and record ownership must be set server-side only, never "
+    "accepted from client input. Triage note: this probe confirmed the field was PERSISTED "
+    "via an independent read-back (not merely reflected in the create response), but it did "
+    "NOT prove the stored field actually governs authorization or billing — a persisted role "
+    "string may or may not be honored by the authorization layer, so confirm the field's real "
+    "effect (ideally via a two-identity scan) before treating it as privilege escalation. "
+    "Cleanup: this probe created synthetic 'kuvprobe' rows via POST that persist on the "
+    "target; kuv performs no DELETE, so purge them manually."
 )
 _MASS_PLAIN_IMPACT = (
     "A user can set fields the server is supposed to control just by adding them to the "
     "request — for example giving themselves a huge balance or credit count, marking their "
-    "account verified, upgrading to a paid plan for free, or reassigning who owns a record."
+    "account verified, upgrading to a paid plan for free, reassigning who owns a record, or "
+    "setting a role/admin flag. This probe read the record back from an independent request "
+    "and confirmed the injected field was actually stored, not just reflected — but it did "
+    "not prove the stored field grants elevated privileges (it may be persisted yet ignored "
+    "by the authorization layer). Note: the probe left synthetic 'kuvprobe' records behind "
+    "that should be purged."
 )
 
 
-def _make_finding(path: str, status: Any, fields: list[_Field], privilege: bool) -> MassAssignmentFinding:
+def _make_finding(path: str, status: Any, fields: list[_Field]) -> MassAssignmentFinding:
     names = ", ".join(sorted({f.name for f in fields}))
-    if privilege:
-        finding_type, title = "privilege_escalation", _PRIV_TITLE
-        recommendation, plain_impact = _PRIV_RECOMMENDATION, _PRIV_PLAIN_IMPACT
-    else:
-        finding_type, title = "mass_assignment", _MASS_TITLE
-        recommendation, plain_impact = _MASS_RECOMMENDATION, _MASS_PLAIN_IMPACT
     return MassAssignmentFinding(
-        finding_type=finding_type,
-        title=title,
+        finding_type="mass_assignment",
+        title=_MASS_TITLE,
         location=f"POST /{path}",
-        # value-free: status + injected field NAMES only (never the echoed values).
+        # value-free: status + injected field NAMES only (never the echoed values, and never
+        # the target's record id — the read-back path uses an <id> placeholder here).
         evidence=(
-            f"POST /{path} → {status}; JSON response echoed injected field(s) [{names}] "
-            "with the injected value (not HTML; distinct from the benign baseline response)"
+            f"POST /{path} → {status}; JSON response echoed injected field(s) [{names}] with "
+            "the injected value (not HTML; distinct from the benign baseline), and an "
+            f"independent GET /{path}/<id> read-back confirmed [{names}] persisted with the "
+            "injected value. Persistence is proven; whether the field governs authorization "
+            "is NOT. Synthetic 'kuvprobe' rows were created via POST and are not auto-deleted."
         ),
-        recommendation=recommendation,
-        plain_impact=plain_impact,
+        recommendation=_MASS_RECOMMENDATION,
+        plain_impact=_MASS_PLAIN_IMPACT,
         contains_pii_or_secrets=False,
     )
 
@@ -337,18 +379,25 @@ def _make_finding(path: str, status: Any, fields: list[_Field], privilege: bool)
 
 
 def probe_mass_assignment(
-    post: Callable[[str, str, dict], Optional[tuple]],
+    request: Callable[[str, str, Optional[str]], Optional[tuple]],
     endpoints: tuple[str, ...],
     cap: int = 12,
 ) -> tuple[list[MassAssignmentFinding], int, bool]:
-    """POST a benign object then an injected object to each endpoint; flag echoed fields.
+    """POST a benign then an injected object to each endpoint, then read the record back to
+    prove the injected fields were actually stored (not merely echoed).
 
-    ``post(path, body, headers)`` returns ``(status, headers, body)`` or ``None``
-    (refused/blocked/error); the caller sends it through the gated egress. Each endpoint
-    costs up to two POSTs (baseline, then injected), and at most ``cap`` POSTs are made in
-    total. For each endpoint we emit at most one ``privilege_escalation`` finding (if any
-    role/admin/permission field was accepted) and at most one ``mass_assignment`` finding
-    (if any other privileged field was accepted). Returns ``(findings, probed, truncated)``.
+    ``request(method, path, body)`` returns ``(status, headers, body)`` or ``None``
+    (refused/blocked/error); the caller sends it through the gated egress. ``method`` is
+    ``"POST"`` (``body`` is the JSON string) or ``"GET"`` (``body`` is ``None``). Per
+    endpoint: POST baseline, POST injected, compute the differential, then — only if the
+    differential is non-empty — parse the created id from the injected response and issue an
+    independent ``GET <endpoint>/<id>``; a differential field is emitted only if that
+    read-back still carries it with the injected value.
+
+    ``cap`` bounds the number of POSTs (writes) across all endpoints (two per endpoint); the
+    read-back GET is a read and is not charged against it. For each endpoint at most one
+    ``mass_assignment`` finding is emitted (this probe never emits ``privilege_escalation``).
+    Returns ``(findings, probed, truncated)`` where ``probed`` counts POSTs made.
     """
     out: list[MassAssignmentFinding] = []
     probed = 0
@@ -361,7 +410,7 @@ def probe_mass_assignment(
             break
 
         baseline_obj: Optional[Any] = None
-        base_res = post(path, BASELINE_BODY, PROBE_HEADERS)
+        base_res = request("POST", path, BASELINE_BODY)
         probed += 1
         if base_res is not None:
             _b_status, _b_headers, b_body = base_res
@@ -372,21 +421,45 @@ def probe_mass_assignment(
             truncated = True
             break
 
-        inj_res = post(path, INJECTED_BODY, PROBE_HEADERS)
+        inj_res = request("POST", path, INJECTED_BODY)
         probed += 1
         if inj_res is None:
             continue
         status, _headers, body = inj_res
 
-        accepted = _accepted_fields(status, body, baseline_obj)
+        inj_obj = _parse_json(body)  # None if HTML / non-JSON
+        accepted = _differential_fields(status, inj_obj, baseline_obj)
         if not accepted:
+            # No echoed differential at all -> nothing to try to prove.
             continue
 
-        priv = [f for f in accepted if f.is_privilege]
-        mass = [f for f in accepted if not f.is_privilege]
-        if priv:
-            out.append(_make_finding(path, status, priv, privilege=True))
-        if mass:
-            out.append(_make_finding(path, status, mass, privilege=False))
+        # --- second hop: prove STORAGE with an independent read-back GET ------------------
+        obj_id = _extract_id(inj_obj)
+        if obj_id is None:
+            # Cannot locate the created record -> storage unproven -> emit nothing.
+            continue
+
+        read_res = request("GET", f"{str(path).rstrip('/')}/{obj_id}", None)
+        if read_res is None:
+            continue  # read-back refused/blocked/error -> storage unproven
+        r_status, _r_headers, r_body = read_res
+        try:
+            r_code = int(r_status)
+        except (TypeError, ValueError):
+            continue
+        if not (200 <= r_code < 300):
+            continue  # 4xx/5xx read-back -> record not retrievable -> storage unproven
+        read_obj = _parse_json(r_body)  # None if HTML / non-JSON
+        if read_obj is None:
+            continue
+        read_pairs = _collect_pairs(read_obj, None)
+
+        # A differential field qualifies ONLY if it survives in the read-back record.
+        persisted = [f for f in accepted if _field_present_with_injected_value(f, read_pairs)]
+        if not persisted:
+            # Echoed but not stored (the res.json({...req.body, id}) reflect-only shape).
+            continue
+
+        out.append(_make_finding(path, status, persisted))
 
     return out, probed, truncated

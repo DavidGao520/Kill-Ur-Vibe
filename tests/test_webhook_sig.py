@@ -2,8 +2,14 @@
 
 No network: the injected ``post`` callable is faked to return ``(status, headers,
 body)`` tuples (or ``None`` for refused). The whole point of the probe is zero false
-positives, so the negative and HTML-catch-all fixtures are as important as the
-positive one.
+positives, so the negative, the HTML-catch-all, the no-payment-signal, and the
+verifies-the-forged-signature fixtures are as important as the positive one.
+
+The probe emits a PAYMENT-framed finding only when (a) there is a positive
+payment-provider signal (the path names a payment provider, or ``payment_detected``),
+AND (b) an unsigned event AND the same body carrying a BOGUS signature are BOTH
+accepted — the signed-vs-unsigned differential that proves the endpoint verifies
+nothing.
 """
 
 from __future__ import annotations
@@ -14,16 +20,17 @@ from kuv.recon.webhook_sig import (
     DEFAULT_ENDPOINTS,
     PROBE_BODY,
     PROBE_HEADERS,
+    PROBE_SIGNED_HEADERS,
     WebhookFinding,
     _is_unverified,
     _looks_html,
-    _provider,
+    _payment_provider,
     probe_webhook_sig,
 )
 
 
 # --------------------------------------------------------------------------
-# the probe request itself is safe by construction
+# the probe requests themselves are safe by construction
 # --------------------------------------------------------------------------
 
 
@@ -36,11 +43,21 @@ def test_probe_body_is_a_benign_nonexistent_synthetic_event():
     assert ev["livemode"] is False
 
 
-def test_probe_sends_no_signature_header():
-    # The omission of any signing header is the entire test.
+def test_unsigned_probe_sends_no_signature_header():
+    # The omission of any signing header is the entire first request.
     keys = {k.lower() for k in PROBE_HEADERS}
     assert "stripe-signature" not in keys
     assert not any("signature" in k for k in keys)
+
+
+def test_signed_probe_carries_a_bogus_signature_over_the_same_body():
+    # The differential request: SAME body, plus a garbage signature header. A verifying
+    # endpoint rejects it; an endpoint that ignores signatures accepts it identically.
+    keys = {k.lower() for k in PROBE_SIGNED_HEADERS}
+    assert "stripe-signature" in keys
+    assert any("signature" in k for k in keys)
+    # the bogus signature is non-empty (so a verifier actually has something to reject)
+    assert PROBE_SIGNED_HEADERS["stripe-signature"]
 
 
 # --------------------------------------------------------------------------
@@ -90,23 +107,115 @@ def test_2xx_missing_signing_secret_rejection_is_not_a_finding():
     assert _is_unverified(200, '{"error":"webhook signing key is not set"}') is False
 
 
-def test_provider_bucketing_dedupes_aliases():
-    assert _provider("api/webhooks/stripe") == "stripe"
-    assert _provider("api/stripe/webhook") == "stripe"
-    assert _provider("api/webhooks/clerk") == "clerk"
-    assert _provider("api/webhooks/github") == "github"
-    assert _provider("api/webhooks") == "generic"
+def test_payment_provider_bucketing():
+    # Payment providers are recognized (aliases collapse to one bucket)...
+    assert _payment_provider("api/webhooks/stripe") == "stripe"
+    assert _payment_provider("api/stripe/webhook") == "stripe"
+    assert _payment_provider("api/webhooks/paddle") == "paddle"
+    assert _payment_provider("api/webhooks/lemonsqueezy") == "lemonsqueezy"
+    assert _payment_provider("hooks/lemon") == "lemonsqueezy"
+    assert _payment_provider("api/webhooks/razorpay") == "razorpay"
+    assert _payment_provider("api/webhooks/paypal") == "paypal"
+    # ...but a generic path and non-payment providers (auth, VCS) carry NO signal.
+    assert _payment_provider("api/webhooks") is None
+    assert _payment_provider("webhook") is None
+    assert _payment_provider("api/webhooks/clerk") is None
+    assert _payment_provider("api/webhooks/github") is None
 
 
 # --------------------------------------------------------------------------
-# runner-level: fetch loop, provider dedup, cap
+# runner-level BENIGN cases — the whole point of the fix: these emit ZERO findings
 # --------------------------------------------------------------------------
 
 
-def test_positive_unverified_stripe_yields_exactly_one_finding():
+def test_benign_generic_catchall_200_with_no_payment_signal_is_empty():
+    # THE reviewer false positive. A generic webhook catch-all answers 200
+    # {"received":true} for every path, stripe paths 404, and there is NO payment
+    # signal (payment_detected=False, no provider in a generic path). The old probe
+    # reported this HIGH webhook_unverified with a hard-coded payment impact; the fixed
+    # probe emits NOTHING — the generic catch-alls are never even probed.
     def post(path, body, headers):
-        assert body == PROBE_BODY and headers == PROBE_HEADERS
+        if path in ("api/webhooks", "webhook", "api/webhook"):
+            return (200, {"content-type": "application/json"}, '{"received": true}')
+        return (404, {}, "Not Found")
+
+    findings, probed, truncated = probe_webhook_sig(post, payment_detected=False)
+    assert findings == []
+
+
+def test_benign_single_generic_received_true_is_empty():
+    # The exact spec shape: {"received":true} 200 at "api/webhooks", payment_detected
+    # False, no provider in the path → nothing (and never even probed).
+    def post(path, body, headers):
+        return (200, {"content-type": "application/json"}, '{"received": true}')
+
+    findings, probed, truncated = probe_webhook_sig(
+        post, candidates=("api/webhooks",), payment_detected=False
+    )
+    assert findings == []
+    assert probed == 0  # no payment signal → not probed at all
+
+
+def test_benign_stripe_path_that_verifies_the_forged_signature_is_empty():
+    # A stripe-named receiver that accepts the UNSIGNED event (tolerates a missing
+    # header) but REJECTS the bogus signature — i.e. it actually verifies. The
+    # differential must clear it: no finding.
+    def post(path, body, headers):
+        if path != "api/webhooks/stripe":
+            return (404, {}, "Not Found")
+        if headers.get("stripe-signature"):  # forged signature present → verify → reject
+            return (400, {}, '{"error":"No signatures found matching the expected signature"}')
+        return (200, {"content-type": "application/json"}, '{"received": true}')
+
+    findings, probed, truncated = probe_webhook_sig(post)
+    assert findings == []
+
+
+def test_negative_signature_verified_yields_nothing():
+    def post(path, body, headers):
+        # Every receiver correctly rejects the unsigned event.
+        return (400, {"content-type": "application/json"},
+                '{"error":"No signatures found matching the expected signature"}')
+
+    findings, probed, truncated = probe_webhook_sig(post, payment_detected=True)
+    assert findings == []
+    assert probed > 0
+
+
+def test_html_catchall_yields_nothing():
+    def post(path, body, headers):
+        return (200, {"content-type": "text/html"},
+                "<!doctype html><html><head></head><body>app</body></html>")
+
+    findings, probed, truncated = probe_webhook_sig(post, payment_detected=True)
+    assert findings == []
+
+
+def test_refused_post_yields_nothing():
+    def post(path, body, headers):
+        return None
+
+    # payment_detected=True so every candidate is eligible and probed once.
+    findings, probed, truncated = probe_webhook_sig(post, payment_detected=True)
+    assert findings == []
+    assert probed == len(DEFAULT_ENDPOINTS)
+
+
+# --------------------------------------------------------------------------
+# runner-level MALICIOUS case — the endpoint that ignores signatures entirely
+# --------------------------------------------------------------------------
+
+
+def test_malicious_stripe_accepts_both_yields_exactly_one_finding():
+    # "api/webhooks/stripe" (payment provider in the path) accepts the unsigned event
+    # AND the bogus-signature event identically → the endpoint verifies nothing →
+    # exactly one High webhook_unverified with payment framing.
+    seen_headers = []
+
+    def post(path, body, headers):
+        assert body == PROBE_BODY  # both requests carry the SAME body
         if path == "api/webhooks/stripe":
+            seen_headers.append(tuple(sorted(k.lower() for k in headers)))
             return (200, {"content-type": "application/json"}, '{"received": true}')
         return (404, {}, "Not Found")
 
@@ -117,59 +226,35 @@ def test_positive_unverified_stripe_yields_exactly_one_finding():
     assert f.finding_type == "webhook_unverified"
     assert f.contains_pii_or_secrets is False
     assert f.location == "POST /api/webhooks/stripe"
+    # payment framing is present in the plain-language impact
+    assert "payment" in f.plain_impact.lower()
     # evidence must be value-free: no body values leaked
     assert "received" not in f.evidence
+    # the differential really ran: an unsigned request and a signed one both hit the path
+    assert any("stripe-signature" not in h for h in seen_headers)
+    assert any("stripe-signature" in h for h in seen_headers)
     assert not truncated
-    assert probed > 0
+    assert probed == 2  # one unsigned + one bogus-signature POST; aliases short-circuited
 
 
-def test_negative_signature_verified_yields_nothing():
-    def post(path, body, headers):
-        # Every receiver correctly rejects the unsigned event.
-        return (400, {"content-type": "application/json"},
-                '{"error":"No signatures found matching the expected signature"}')
-
-    findings, probed, truncated = probe_webhook_sig(post)
-    assert findings == []
-    assert probed > 0
-
-
-def test_html_catchall_yields_nothing():
-    def post(path, body, headers):
-        return (200, {"content-type": "text/html"},
-                "<!doctype html><html><head></head><body>app</body></html>")
-
-    findings, probed, truncated = probe_webhook_sig(post)
-    assert findings == []
-
-
-def test_refused_post_yields_nothing():
-    def post(path, body, headers):
-        return None
-
-    findings, probed, truncated = probe_webhook_sig(post)
-    assert findings == []
-    assert probed == len(DEFAULT_ENDPOINTS)
-
-
-def test_alias_dedup_reports_one_finding_per_provider():
-    # Every path accepts the unsigned event; aliases of one provider must collapse.
+def test_dedup_one_finding_per_provider_bucket():
+    # Endpoint ignores signatures on EVERY path (accepts unsigned AND bogus identically).
+    # With payment_detected=True the generic catch-alls are also in scope, yet the five
+    # Stripe aliases collapse to one finding and every provider-less catch-all collapses
+    # to one payment-detected finding: two total, never the reviewer's "up to four".
     def post(path, body, headers):
         return (200, {"content-type": "application/json"}, "")
 
-    findings, probed, truncated = probe_webhook_sig(post)
-    # stripe + generic + clerk + github = 4 distinct receivers
-    assert len(findings) == 4
+    findings, probed, truncated = probe_webhook_sig(post, payment_detected=True)
+    assert len(findings) == 2
     assert {f.finding_type for f in findings} == {"webhook_unverified"}
-    # only 4 real POSTs; the 6 alias paths were skipped (no budget spent)
-    assert probed == 4
     assert not truncated
 
 
 def test_cap_is_respected():
     def post(path, body, headers):
-        return None  # refused → nothing added to hit_providers → every path is probed
+        return None  # refused → nothing added to hit_buckets → every path is probed
 
-    findings, probed, truncated = probe_webhook_sig(post, cap=3)
+    findings, probed, truncated = probe_webhook_sig(post, cap=3, payment_detected=True)
     assert probed == 3
     assert truncated is True

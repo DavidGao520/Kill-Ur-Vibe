@@ -21,13 +21,25 @@ Safety / blast-radius properties (the whole reason this is legitimate to run):
 * **Benign, non-mutating event type.** The event type is ``customer.created`` (an
   informational type), not a fulfillment/payment trigger, so a naive handler hits a
   no-op branch rather than a "grant value" branch.
-* **Single POST per candidate, bounded by ``cap``.** Aliases of the same provider are
-  probed at most once (dedup by provider), so a match short-circuits its siblings.
+* **Payment-provider signal required.** The finding is payment-framed, so it is emitted
+  ONLY when there is a positive payment-provider signal for the candidate: the receiver
+  path itself names a known payment provider (stripe, paddle, lemonsqueezy, braintree,
+  square, razorpay, paypal, chargebee, recurly), or the caller passes
+  ``payment_detected=True`` (its fingerprint already saw a payment provider on the
+  target). A bare ``200`` at a generic ``/api/webhooks`` with no such signal is NOT
+  evidence of a forgeable payment and emits nothing.
+* **Signed-vs-unsigned differential.** Acceptance is proven with TWO requests: the
+  unsigned event, and the SAME body carrying a syntactically-plausible but BOGUS
+  signature header. A finding fires only when BOTH are accepted identically — that is
+  what proves the endpoint ignores signatures entirely. If the bogus-signature request
+  is rejected (non-2xx or a signature marker), the endpoint verifies ⇒ no finding.
 * **Zero false positives.** A vibe-coded SPA answers ``200`` + its HTML shell for any
   path, so an HTML-document body is REJECTED. A body that acknowledges a signature
   check (``"No signatures found…"``, ``"invalid signature"``, ``"unauthorized"``, …)
-  is REJECTED — that means the endpoint *did* verify. Only a real 2xx acceptance of an
-  unsigned event, that is neither HTML nor a signature rejection, is a finding.
+  is REJECTED — that means the endpoint *did* verify.
+* **At most one finding per provider bucket.** Aliases of one receiver (the five Stripe
+  spellings, or several generic catch-alls) collapse to a single finding, so a catch-all
+  is never reported four times.
 
 The module never imports :mod:`kuv.severity` and never decides a severity — it emits a
 plain ``finding_type`` string; the deterministic severity table maps it downstream.
@@ -98,6 +110,24 @@ PROBE_BODY: str = json.dumps(_SYNTHETIC_EVENT, sort_keys=True, separators=(",", 
 # whole test. `content-type` only.
 PROBE_HEADERS: dict = {"content-type": "application/json"}
 
+# The DIFFERENTIAL request: the SAME body, plus a syntactically-plausible but
+# cryptographically BOGUS signature. A verifying endpoint rejects this (the signature
+# cannot validate against any secret); an endpoint that ignores signatures accepts it
+# identically to the unsigned request. Firing ONLY when both are accepted is what proves
+# the endpoint does no verification at all — a lone unsigned 200 could be an endpoint
+# that merely tolerates a missing header. Stripe- and Standard-Webhooks-style header
+# names are both set so the bogus signature lands whatever the provider.
+_BOGUS_SIGNATURE = (
+    "t=1700000000,"
+    "v1=00000000000000000000000000000000000000000000000000000000deadbeef"
+)
+PROBE_SIGNED_HEADERS: dict = {
+    "content-type": "application/json",
+    "stripe-signature": _BOGUS_SIGNATURE,
+    "webhook-signature": _BOGUS_SIGNATURE,
+    "x-signature": _BOGUS_SIGNATURE,
+}
+
 # --------------------------------------------------------------------------
 # matchers
 # --------------------------------------------------------------------------
@@ -147,17 +177,40 @@ def _is_unverified(status: int, body: str) -> bool:
     return True
 
 
-def _provider(path: str) -> str:
-    """Coarse provider bucket for a candidate path, so alias paths of ONE receiver
-    (e.g. the five Stripe spellings) are not reported five times."""
+# Known PAYMENT providers whose forged "payment succeeded" events do real damage. The
+# finding is payment-framed, so a candidate needs one of these NAMED IN ITS PATH (or the
+# caller's ``payment_detected`` flag) before it can be reported. Non-payment webhook
+# providers (clerk auth, github) are deliberately absent: a forged event there is not a
+# fake payment, so this probe stays silent on them.
+_PAYMENT_PROVIDER_TOKENS: tuple[tuple[str, str], ...] = (
+    ("stripe", "stripe"),
+    ("paddle", "paddle"),
+    ("lemonsqueezy", "lemonsqueezy"),
+    ("lemon", "lemonsqueezy"),
+    ("braintree", "braintree"),
+    ("square", "square"),
+    ("razorpay", "razorpay"),
+    ("paypal", "paypal"),
+    ("chargebee", "chargebee"),
+    ("recurly", "recurly"),
+)
+
+# Bucket for a payment signal that comes from the caller's fingerprint
+# (``payment_detected=True``) rather than from a provider-named path. All such
+# provider-less candidates share this ONE bucket, so a set of generic catch-alls
+# collapses to a single finding.
+_DETECTED_BUCKET = "payment-detected"
+
+
+def _payment_provider(path: str) -> Optional[str]:
+    """Canonical payment-provider bucket NAMED BY the candidate path, or ``None`` when
+    the path names no known payment provider. Substring match, so ``api/webhooks/stripe``
+    and ``api/stripe/webhook`` both bucket to ``stripe`` and their aliases collapse."""
     low = (path or "").lower()
-    if "stripe" in low:
-        return "stripe"
-    if "clerk" in low:
-        return "clerk"
-    if "github" in low:
-        return "github"
-    return "generic"
+    for token, bucket in _PAYMENT_PROVIDER_TOKENS:
+        if token in low:
+            return bucket
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -184,47 +237,81 @@ def probe_webhook_sig(
     post: Callable[[str, str, dict], Optional[tuple]],
     candidates: tuple[str, ...] = DEFAULT_ENDPOINTS,
     cap: int = 12,
+    payment_detected: bool = False,
 ) -> tuple[list[WebhookFinding], int, bool]:
-    """POST one unsigned synthetic event to each candidate; flag receivers that accept it.
+    """POST an unsigned AND a bogus-signature synthetic event to each candidate that
+    carries a payment-provider signal; flag receivers that accept BOTH identically.
 
     ``post(candidate_path, body, headers)`` returns ``(status, headers, body)`` or
-    ``None`` (refused/error); the caller sends it through the gated egress. At most
-    ``cap`` POSTs total. Aliases of an already-flagged provider are skipped (they cost
-    no budget). Returns ``(findings, probed_count, truncated)``.
+    ``None`` (refused/error); the caller sends it through the gated egress. A candidate
+    is probed only when there is a positive payment-provider signal — its path names a
+    known payment provider, or ``payment_detected`` is True. A finding is emitted only
+    when the unsigned event AND the same body with a BOGUS signature header are BOTH
+    accepted (2xx, non-HTML, no signature-check marker): that differential proves the
+    endpoint does no signature verification at all. At most ``cap`` POSTs total, and at
+    most one finding per provider bucket (aliases of one receiver never double-count).
+    Returns ``(findings, probed_count, truncated)``.
     """
     out: list[WebhookFinding] = []
     probed = 0
     truncated = False
-    hit_providers: set[str] = set()
+    hit_buckets: set[str] = set()
 
     for path in candidates:
-        provider = _provider(path)
-        if provider in hit_providers:
-            continue  # same receiver already proven — do not re-probe or double-count
+        # A payment-framed finding needs a POSITIVE payment-provider signal: either the
+        # receiver path names a known payment provider, or the caller's fingerprint
+        # already detected a payment provider on this target. Without one, a bare 200 at
+        # a generic webhook path is NOT evidence of a forgeable payment — emit nothing.
+        bucket = _payment_provider(path)
+        if bucket is None:
+            if not payment_detected:
+                continue
+            bucket = _DETECTED_BUCKET
+
+        if bucket in hit_buckets:
+            continue  # this receiver is already proven — never re-probe or double-count
+
         if probed >= cap:
             truncated = True
             return out, probed, truncated
-        res = post(path, PROBE_BODY, PROBE_HEADERS)
+        res_unsigned = post(path, PROBE_BODY, PROBE_HEADERS)
         probed += 1
-        if res is None:
+        if res_unsigned is None:
             continue
-        status, _headers, body = res
-        if _is_unverified(status, body):
-            hit_providers.add(provider)
-            out.append(
-                WebhookFinding(
-                    finding_type="webhook_unverified",
-                    title=_TITLE,
-                    location=f"POST /{path}",
-                    # value-free: status + byte count only; the acceptance IS the signal.
-                    evidence=(
-                        f"POST /{path} → {status}, {len(body or '')} bytes; "
-                        "unsigned synthetic event accepted, response is not HTML and "
-                        "contains no signature-check marker"
-                    ),
-                    recommendation=_RECOMMENDATION,
-                    plain_impact=_PLAIN_IMPACT,
-                    contains_pii_or_secrets=False,
-                )
+        s1, _h1, b1 = res_unsigned
+        if not _is_unverified(s1, b1):
+            continue  # unsigned event rejected / HTML / sig-marker → endpoint is fine
+
+        if probed >= cap:
+            truncated = True
+            return out, probed, truncated
+        # Differential: the SAME body, now carrying a bogus signature header.
+        res_bogus = post(path, PROBE_BODY, PROBE_SIGNED_HEADERS)
+        probed += 1
+        if res_bogus is None:
+            continue
+        s2, _h2, b2 = res_bogus
+        if not _is_unverified(s2, b2):
+            continue  # forged signature REJECTED → endpoint verifies → NOT a finding
+
+        # Unsigned AND forged-signature events were both accepted identically: the
+        # endpoint ignores webhook signatures entirely.
+        hit_buckets.add(bucket)
+        out.append(
+            WebhookFinding(
+                finding_type="webhook_unverified",
+                title=_TITLE,
+                location=f"POST /{path}",
+                # value-free: statuses + byte counts only; the dual acceptance IS the signal.
+                evidence=(
+                    f"POST /{path} unsigned → {s1}, {len(b1 or '')} bytes; "
+                    f"same body + bogus signature → {s2}, {len(b2 or '')} bytes; "
+                    "both accepted, neither HTML nor a signature-check marker — "
+                    "endpoint ignores webhook signatures"
+                ),
+                recommendation=_RECOMMENDATION,
+                plain_impact=_PLAIN_IMPACT,
+                contains_pii_or_secrets=False,
             )
+        )
     return out, probed, truncated

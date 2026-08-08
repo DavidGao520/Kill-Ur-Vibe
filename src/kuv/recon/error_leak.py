@@ -37,6 +37,15 @@ SAFETY properties (this module is a pure analyzer):
   ``<!doctype html>`` SPA shell or marketing page matches **none** of them
   (proven by the HTML-catch-all test).
 
+  NOTE on the status gate: because HTML is not rejected, a rendered docs /
+  tutorial / changelog page that prints an EXAMPLE traceback in its prose could
+  otherwise trip a traceback signature. So a *rendered traceback* is only a
+  finding when the response is itself an error (``status >= 400``) — a plain
+  ``200`` page carrying an example traceback yields nothing. The one exception
+  is a live **interactive debugger console** (Werkzeug's ``__debugger__`` /
+  ``pin_input`` console): that is a code-execution surface, renders behind a
+  ``200``, and therefore fires on any status.
+
 Evidence is value-free: framework label, matched signature NAME, status code,
 and byte count only — never the leaked source paths, locals, or secrets that a
 debug page may contain.
@@ -104,18 +113,56 @@ def _malformed(endpoint: str) -> str:
     return f"{endpoint}{sep}id=%27%22%3C%3E&page=notanumber"
 
 
-def _detect_trace(body: Optional[str]) -> Optional[tuple[str, str]]:
+# Interactive-debugger console markers. Their presence means a *live*,
+# code-executing debugger (Werkzeug's) is exposed in production — you can run
+# code through the browser. That console renders behind a ``200``, so unlike a
+# rendered traceback it is a finding regardless of HTTP status.
+_DEBUGGER_MARKERS = (
+    "werkzeug debugger",
+    "__debugger__",
+    'id="pin_input"',
+    "the debugger caught an exception",
+    "console-mode",
+)
+
+
+def _detect_trace(
+    status: Optional[int], body: Optional[str]
+) -> Optional[tuple[str, str]]:
     """Return ``(framework_label, signature_name)`` for a real debug page, else None.
 
-    Each branch demands a multi-token signature. Token *names* — not the matched
-    values — are what get returned, so the caller can build value-free evidence.
+    Two ways to fire, and only two:
+
+    * **(b) interactive debugger console** — a live, code-executing debugger
+      (Werkzeug's) exposed in production. Conclusive on **any** status, because
+      the console renders behind a ``200``.
+    * **(a) rendered framework traceback** — a stack-trace-shaped signature, but
+      **only** when the response is itself an error (``status >= 400``). A plain
+      ``200`` docs / tutorial / changelog page that prints an EXAMPLE traceback
+      in its prose is not a leak, so every traceback signature is gated behind
+      the error status.
+
+    Each traceback branch still demands a multi-token signature. Token *names* —
+    not the matched values — are what get returned, so the caller can build
+    value-free evidence.
     """
     if not body:
         return None
     b = body
     low = b.lower()
 
-    # Werkzeug / Flask traceback or interactive debugger.
+    # (b) Live interactive debugger console -> a real exposure on ANY status.
+    for marker in _DEBUGGER_MARKERS:
+        if marker in low:
+            return ("werkzeug/flask", "interactive_debugger_console")
+
+    # (a) Every remaining signature is a *rendered* traceback, which is only a
+    # real leak when the response is itself an error. Gate them behind an error
+    # status so a 200 page that merely shows an example traceback cannot fire.
+    if status is None or status < 400:
+        return None
+
+    # Werkzeug / Flask traceback (interactive-console markers ruled out above).
     if "Traceback (most recent call last)" in b and (
         "werkzeug" in low or _PY_SRC_LINE.search(b)
     ):
@@ -206,7 +253,7 @@ def probe_error_leak(
             continue
 
         status, _headers, body = res
-        hit = _detect_trace(body)
+        hit = _detect_trace(status, body)
         if hit is None:
             continue
 

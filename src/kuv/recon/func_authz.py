@@ -68,17 +68,13 @@ DEFAULT_PRIVILEGED_ROUTES: tuple[str, ...] = (
     "api/admin/users",
     "admin/api",
     "api/internal",
-    "api/users",
-    "api/all-users",
+    "api/internal/config",
     "api/config",
     "api/settings",
     "api/settings/global",
     "api/export",
     "api/logs",
     "api/metrics",
-    "api/accounts",
-    "api/tenants",
-    "api/organizations",
 )
 
 # --------------------------------------------------------------------------
@@ -87,9 +83,16 @@ DEFAULT_PRIVILEGED_ROUTES: tuple[str, ...] = (
 
 # Whole path-segment tokens that mark a route as a privileged/admin FUNCTION. A
 # match on ANY segment qualifies the route. Kept to admin/internal/config/settings/
-# export/logs/metrics/directory-listing tokens so plainly public routes (blog, about,
-# health, products, …) never qualify. Deliberately excludes generic words like
-# "events"/"stats" that are commonly public feeds.
+# export/logs/metrics tokens so plainly public routes (blog, about, health, products,
+# …) never qualify. Deliberately excludes generic words like "events"/"stats" that are
+# commonly public feeds — AND, per a reproduced false positive, excludes DIRECTORY /
+# tenancy NAMES (users, members, customers, accounts, tenants, organizations, orgs,
+# org, …): a by-design PUBLIC directory / team page / leaderboard (e.g. GET /api/users
+# → [{id, username, avatar_url}], GET /api/accounts leaderboard) is NOT admin-restricted
+# and must not be flagged here. A genuinely-privileged wrapping of a directory still
+# fires via its admin/internal segment (/api/admin/users, /api/internal/config); a
+# public directory that leaks PII is covered by the generic unauth API sweep + the PII
+# rating, NOT by this route-NAME probe.
 _PRIV_TOKENS: frozenset[str] = frozenset(
     {
         # admin / operator surface
@@ -103,10 +106,6 @@ _PRIV_TOKENS: frozenset[str] = frozenset(
         "export", "exports", "dump", "backup",
         "logs", "log", "audit",
         "metrics", "telemetry",
-        # multi-record directory / tenancy surface
-        "accounts", "tenants", "tenant",
-        "organizations", "organization", "orgs", "org",
-        "users", "all-users", "allusers", "members", "customers",
     }
 )
 

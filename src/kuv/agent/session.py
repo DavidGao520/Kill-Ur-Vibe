@@ -33,12 +33,7 @@ from kuv.recon.dns import enumerate_subdomains as _dns_enumerate
 from kuv.recon.fingerprint import fingerprint as _fingerprint
 from kuv.recon.templated import CHECKS as _TEMPLATED_CHECKS, run_templated_checks as _run_templated_checks
 from kuv.recon.backend_rls import DEFAULT_TABLES as _RLS_TABLES, probe_backend_rls as _probe_backend_rls
-from kuv.recon.webhook_sig import (
-    DEFAULT_ENDPOINTS as _WEBHOOK_ENDPOINTS,
-    PROBE_BODY as _WEBHOOK_BODY,
-    PROBE_HEADERS as _WEBHOOK_HEADERS,
-    probe_webhook_sig as _probe_webhook_sig,
-)
+from kuv.recon.webhook_sig import DEFAULT_ENDPOINTS as _WEBHOOK_ENDPOINTS, probe_webhook_sig as _probe_webhook_sig
 # `_malformed` is the module's deterministic "endpoint -> malformed path" transform; the
 # session pre-fetches on that exact key so the sync analyzer's fetch(path) is a cache hit.
 from kuv.recon.error_leak import _malformed as _err_malformed, probe_error_leak as _probe_error_leak
@@ -578,49 +573,39 @@ class AssessmentSession:
             "open_tables": [_probe_row_to_dict(r, location=build(r.location)) for r in rows],
         }
 
-    async def webhook_sig_probe(self, url: str, *, cap: int = 12) -> dict:
-        """Fingerprint-gated (Stripe / webhook) WRITE probe: POST an UNSIGNED synthetic
-        event (a benign type referencing NON-EXISTENT object ids) to common receiver paths.
-        A receiver that accepts it (2xx, no signature-check marker) is not verifying
-        signatures — an attacker could forge provider events (a fake 'payment succeeded').
-        BLAST RADIUS: no valid signature + fake ids mean a non-verifying handler has no real
-        object to mutate; bounded by `cap`. Gated as an OBJECT_PUT write — on a live target
-        it needs write-authorization in scope AND operator confirmation of that write class,
-        else it returns that requirement instead of probing."""
+    async def webhook_sig_probe(self, url: str, *, payment_detected: bool = False, cap: int = 12) -> dict:
+        """WRITE probe: to each receiver path that carries a PAYMENT-provider signal (the path
+        names a provider, or `payment_detected` from fingerprint_stack), POST an UNSIGNED event
+        AND the same body with a BOGUS signature header; a receiver that accepts BOTH identically
+        does no signature verification, so payment events are forgeable. Paths with no payment
+        signal are not probed (a bare 200 at a generic webhook path is not evidence). BLAST
+        RADIUS: fake ids + no valid signature mean a non-verifying handler has no real object to
+        touch; bounded by `cap`, one finding per provider. Gated as an OBJECT_PUT write — on a
+        live target needs write-auth + operator confirmation, else returns that requirement."""
         base = url if url.endswith("/") else url + "/"
-        # Pre-check the write class once so an unauthorized/unconfirmed run gets a clear
-        # reason (mirrors http_request), never a silent empty result.
+        # Pre-check the write class once so an unauthorized/unconfirmed run gets a clear reason.
         pre = self.engine.evaluate(EgressRequest("POST", base, action_class=ActionClass.OBJECT_PUT))
         if pre.decision is Decision.REFUSE:
             return {"ok": False, "error": f"REFUSED by egress gate: {pre.reason}"}
         if pre.decision is Decision.CONFIRM:
             return {"ok": False,
                     "error": f"NEEDS OPERATOR CONFIRMATION (write class object_put): {pre.reason}"}
+        loop = asyncio.get_running_loop()
 
-        cache: dict[str, tuple | None] = {}
-        probed = 0
-        for path in _WEBHOOK_ENDPOINTS:
-            if probed >= cap:
-                break
-            target = base + path
-            probed += 1
-            verdict = self.engine.evaluate(
+        async def _post(path, body, headers):
+            target = base + str(path).lstrip("/")
+            if self.engine.evaluate(
                 EgressRequest("POST", target, action_class=ActionClass.OBJECT_PUT)
-            )
-            if verdict.decision is not Decision.ALLOW:
-                cache[path] = None
-                continue
+            ).decision is not Decision.ALLOW:
+                return None
             try:
-                resp = await self.client.request(
-                    "POST", target, content=_WEBHOOK_BODY, headers=dict(_WEBHOOK_HEADERS)
-                )
-                cache[path] = (resp.status_code, dict(resp.headers), getattr(resp, "text", "") or "")
+                resp = await self.client.request("POST", target, content=body, headers=dict(headers or {}))
+                return (resp.status_code, dict(resp.headers), getattr(resp, "text", "") or "")
             except Exception:  # noqa: BLE001 — an unreachable path is just "no receiver"
-                cache[path] = None
+                return None
 
-        findings, _, _ = _probe_webhook_sig(
-            lambda p, _b, _h: cache.get(p), cap=len(_WEBHOOK_ENDPOINTS) + 1
-        )
+        findings, probed, _ = await asyncio.to_thread(
+            _probe_webhook_sig, _sync_bridge(loop, _post), _WEBHOOK_ENDPOINTS, cap, payment_detected)
         return {
             "ok": True,
             "base": base,
@@ -698,14 +683,16 @@ class AssessmentSession:
         }
 
     async def mass_assignment_probe(self, url: str, endpoints=None, *, cap: int = 12) -> dict:
-        """WRITE probe: for each create/update endpoint, POST a benign synthetic object then
-        the same object with injected privileged fields (role/is_admin/credits/...); a finding
-        is recorded when the JSON response ECHOES an injected field with the injected value
-        (server accepted it). role/admin/permission fields -> privilege_escalation, else
-        mass_assignment. `endpoints` are POST-able collections (pass ones discover_paths found;
-        a small default set is used if omitted). Gated as an OBJECT_PUT write — needs write-auth
-        + operator confirm on a live target, else returns that requirement. Blast radius: creates
-        synthetic records with marker names + non-existent ids, bounded by cap."""
+        """WRITE probe: POST a benign synthetic object, then the same object with injected
+        privileged fields, then READ BACK the created record with a second, independent GET.
+        A finding is recorded ONLY when an injected field is confirmed PERSISTED on read-back
+        — an echo alone is never a finding, and this probe NEVER emits privilege_escalation
+        (proving a field governs authorization needs a two-identity scan). `endpoints` are
+        POST-able collections (pass ones discover_paths found; a default set otherwise). The
+        POSTs are gated as an OBJECT_PUT write (needs write-auth + operator confirm on a live
+        target, else this returns that requirement); the read-back GET is a passive read.
+        Blast radius: it creates synthetic `kuvprobe` rows that persist (the finding notes
+        them for manual purge — kuv performs no DELETE)."""
         base = url if url.endswith("/") else url + "/"
         pre = self.engine.evaluate(EgressRequest("POST", base, action_class=ActionClass.OBJECT_PUT))
         if pre.decision is Decision.REFUSE:
@@ -716,20 +703,30 @@ class AssessmentSession:
         eps = tuple(endpoints) if endpoints else _MASS_ENDPOINTS
         loop = asyncio.get_running_loop()
 
-        async def _post(path, body, headers):
+        async def _request(method, path, body):
             target = base + str(path).lstrip("/")
-            if self.engine.evaluate(
-                EgressRequest("POST", target, action_class=ActionClass.OBJECT_PUT)
-            ).decision is not Decision.ALLOW:
-                return None
-            try:
-                resp = await self.client.request("POST", target, content=body, headers=dict(headers or {}))
-                return (resp.status_code, dict(resp.headers), getattr(resp, "text", "") or "")
-            except Exception:  # noqa: BLE001
-                return None
+            m = (method or "GET").upper()
+            if m == "GET":  # the read-back leg — a passive read
+                if self.engine.evaluate(EgressRequest("GET", target)).decision is not Decision.ALLOW:
+                    return None
+                try:
+                    resp = await self.client.get(target)
+                except Exception:  # noqa: BLE001
+                    return None
+            else:  # the create legs — gated writes
+                if self.engine.evaluate(
+                    EgressRequest(m, target, action_class=ActionClass.OBJECT_PUT)
+                ).decision is not Decision.ALLOW:
+                    return None
+                try:
+                    resp = await self.client.request(
+                        m, target, content=body, headers={"content-type": "application/json"})
+                except Exception:  # noqa: BLE001
+                    return None
+            return (resp.status_code, dict(resp.headers), getattr(resp, "text", "") or "")
 
         findings, probed, _ = await asyncio.to_thread(
-            _probe_mass_assignment, _sync_bridge(loop, _post), eps, cap)
+            _probe_mass_assignment, _sync_bridge(loop, _request), eps, cap)
         return {
             "ok": True, "base": base, "probed": probed,
             "findings": [_probe_row_to_dict(f) for f in findings],

@@ -58,11 +58,12 @@ def test_positive_unauth_admin_collection_is_flagged():
 
 
 def test_positive_wrapped_collection_is_flagged():
+    # A privileged-NAMED route (admin) wrapping its records in {data:[...]} still fires.
     fetch = _mapfetch(
-        {"api/accounts": (200, _JSON, '{"data":[{"id":1},{"id":2},{"id":3}],"total":3}')},
+        {"api/admin": (200, _JSON, '{"data":[{"id":1},{"id":2},{"id":3}],"total":3}')},
         default=(401, _JSON, "{}"),
     )
-    findings, _, _ = probe_func_authz(fetch, routes=("api/accounts",))
+    findings, _, _ = probe_func_authz(fetch, routes=("api/admin",))
     assert [f.finding_type for f in findings] == ["broken_function_auth"]
     assert "count=3" in findings[0].evidence
 
@@ -80,6 +81,36 @@ def test_positive_config_object_on_config_route_is_flagged():
     findings, _, _ = probe_func_authz(fetch, routes=("api/config",))
     assert [f.finding_type for f in findings] == ["broken_function_auth"]
     assert "shape=object" in findings[0].evidence
+
+
+def test_positive_admin_users_and_internal_config_both_fire():
+    # MALICIOUS (must still fire after the directory-name fix): a genuinely-privileged
+    # route wrapping a directory (/api/admin/users → non-empty array) AND an internal
+    # config route (/api/internal/config → a config object) both leak with no auth.
+    fetch = _mapfetch(
+        {
+            "api/admin/users": (
+                200, _JSON,
+                '[{"id":1,"username":"root","role":"admin"},'
+                '{"id":2,"username":"ops","role":"admin"}]',
+            ),
+            "api/internal/config": (
+                200, _JSON,
+                '{"database_url":"x","stripe_key":"y","jwt_secret":"z","region":"us"}',
+            ),
+        },
+        default=(401, _JSON, '{"error":"unauthorized"}'),
+    )
+    findings, probed, _ = probe_func_authz(
+        fetch, routes=("api/admin/users", "api/internal/config")
+    )
+    assert [f.finding_type for f in findings] == [
+        "broken_function_auth",
+        "broken_function_auth",
+    ]
+    locs = {f.location for f in findings}
+    assert locs == {"GET /api/admin/users", "GET /api/internal/config"}
+    assert probed == 2
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +135,8 @@ def test_negative_all_routes_401_403_404():
 def test_negative_empty_collection_not_flagged():
     fetch = _mapfetch(
         {
-            "api/admin/users": (200, _JSON, "[]"),          # empty list
-            "api/accounts": (200, _JSON, '{"data":[]}'),   # empty wrapped list
+            "api/admin/users": (200, _JSON, "[]"),        # empty list
+            "api/admin": (200, _JSON, '{"data":[]}'),     # empty wrapped list
         },
         default=(401, _JSON, "{}"),
     )
@@ -143,6 +174,32 @@ def test_negative_non_privileged_route_never_fetched():
     assert findings == []
     assert probed == 0
     assert fetch.calls == []                                # never fetched
+
+
+def test_negative_public_directory_users_accounts_is_empty():
+    # REPRODUCED FALSE POSITIVE (must now be EMPTY): a by-design PUBLIC directory
+    # (GET /api/users → [{id, username, avatar_url, bio}]) and a public leaderboard
+    # (GET /api/accounts → [...]) are NOT admin-restricted. "users"/"accounts" are
+    # directory / tenancy NAMES, no longer privileged tokens, so these routes are not
+    # even fetched, and the probe emits ZERO findings. (A public directory that leaks
+    # PII is covered by the generic unauth API sweep + PII rating, not this probe.)
+    fetch = _mapfetch(
+        {
+            "api/users": (
+                200, _JSON,
+                '[{"id":1,"username":"ada","avatar_url":"/a.png","bio":"hi"},'
+                '{"id":2,"username":"bea","avatar_url":"/b.png","bio":"yo"}]',
+            ),
+            "api/accounts": (
+                200, _JSON,
+                '[{"id":1,"name":"ada","points":42},{"id":2,"name":"bea","points":7}]',
+            ),
+        },
+    )
+    findings, probed, _ = probe_func_authz(fetch, routes=("api/users", "api/accounts"))
+    assert findings == []
+    assert probed == 0
+    assert fetch.calls == []                                # neither directory fetched
 
 
 # ---------------------------------------------------------------------------

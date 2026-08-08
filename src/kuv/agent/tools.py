@@ -324,17 +324,19 @@ def build_network_server(session: AssessmentSession):
 
     @tool(
         "webhook_sig_probe",
-        "Stack-specific WRITE probe (run after fingerprint_stack detects Stripe / a webhook "
-        "integration): POST an UNSIGNED synthetic event (benign type, NON-EXISTENT object ids) "
-        "to common receiver paths; a receiver that accepts it does not verify signatures, so "
-        "events are forgeable (webhook_unverified). Blast radius is bounded — no valid signature "
-        "+ fake ids mean a non-verifying handler has no real object to touch. Gated as an "
-        "OBJECT_PUT write: on a live target it needs write-authorization + operator confirmation, "
-        "otherwise it returns that requirement. Record each `unverified` entry with record_finding.",
-        {"url": str},
+        "Stack-specific WRITE probe: to each receiver path carrying a PAYMENT-provider signal, "
+        "POST an UNSIGNED event AND the same body with a BOGUS signature; a receiver that accepts "
+        "BOTH does no signature verification, so payment events are forgeable (webhook_unverified). "
+        "Set `payment_detected=true` when fingerprint_stack detected Stripe/a payment provider — "
+        "otherwise only paths that NAME a provider (…/stripe, …/paddle) are probed; a bare 200 at a "
+        "generic webhook path is NOT reported. Bounded, one finding per provider. Gated as an "
+        "OBJECT_PUT write (needs write-auth + operator confirmation on a live target, else it "
+        "returns that requirement). Record each `unverified` entry with record_finding.",
+        {"url": str, "payment_detected": bool},
     )
     async def webhook_sig_probe_tool(args):
-        return _wrap(await session.webhook_sig_probe(args["url"]))
+        return _wrap(await session.webhook_sig_probe(
+            args["url"], payment_detected=bool(args.get("payment_detected", False))))
 
     @tool(
         "error_leak_probe",
@@ -364,13 +366,14 @@ def build_network_server(session: AssessmentSession):
 
     @tool(
         "mass_assignment_probe",
-        "WRITE probe: for each create/update endpoint, POST a benign synthetic object then the "
-        "same object with injected privileged fields (role/is_admin/credits/plan/...); a finding "
-        "is returned when the JSON response ECHOES an injected field with the injected value "
-        "(server accepted it) — role/admin/permission => privilege_escalation, else "
-        "mass_assignment. Pass `url` (base) and `endpoints` (POST-able collections discover_paths "
-        "found; a small default set if omitted). Gated as OBJECT_PUT (needs write-auth + confirm). "
-        "Creates synthetic records (marker names, non-existent ids). Record each `findings` entry.",
+        "WRITE probe: POST a benign synthetic object, then the same with injected privileged "
+        "fields (role/is_admin/credits/plan/...), then READ BACK the created record with a second "
+        "GET. A `mass_assignment` finding is returned ONLY when an injected field is confirmed "
+        "PERSISTED on read-back — an echo alone is never reported, and this probe never emits "
+        "privilege_escalation (that needs a two-identity scan). Pass `url` (base) and `endpoints` "
+        "(POST-able collections discover_paths found; a default set otherwise). Gated as OBJECT_PUT "
+        "(needs write-auth + confirm). It creates synthetic `kuvprobe` rows that persist — the "
+        "finding notes them for manual purge. Record each `findings` entry.",
         {"url": str, "endpoints": list},
     )
     async def mass_assignment_probe_tool(args):

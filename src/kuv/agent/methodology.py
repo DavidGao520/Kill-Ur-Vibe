@@ -107,10 +107,11 @@ STACK-SPECIFIC probe to unlock instead of one generic sequence:
   — the #1 vibe-coded bug is a data API readable with no auth (Row-Level Security not
   enforced). For Supabase pass the anon `apikey` scan_js surfaced (without it every table
   401s). Record each `open_tables` entry (unauth_read_sensitive).
-- **Stripe / a payment or webhook integration** → `webhook_sig_probe(url)` — POSTs an
-  unsigned synthetic event to common receiver paths; a receiver that accepts it is not
-  verifying signatures (webhook_unverified). WRITE-tier: gated as object_put, so it needs
-  write-authorization + confirmation on a live target.
+- **Stripe / a payment provider** → `webhook_sig_probe(url, payment_detected=true)` — POSTs an
+  unsigned AND a bogus-signature event; a receiver that accepts BOTH is not verifying signatures
+  (webhook_unverified). Pass `payment_detected=true` when you fingerprinted a payment provider;
+  otherwise only provider-NAMED paths (…/stripe) are probed. WRITE-tier: gated as object_put,
+  needs write-authorization + confirmation on a live target.
 - **Any host** → `error_leak_probe(url, paths=[…discovered endpoints…])` for framework
   debug/stack-trace pages (verbose_error_disclosure), and `cors_credentialed_probe(url)`
   for the reflected-Origin + credentials CORS hole (credentialed_cors) that the static
@@ -246,7 +247,9 @@ For EVERY authenticated or data-bearing surface you discover:
 
 Only two things justify stopping before the bar is met: (a) you hit the hard tool-call
 or wall-clock cap — then say so explicitly and report exactly what you did and did not
-cover; or (b) an item genuinely does not apply — say why in one line. Guardrail #9
+cover, and NEVER present a budget-truncated scan as complete (the report also flags this
+deterministically from the audit, so an honest summary must match); or (b) an item
+genuinely does not apply — say why in one line. Guardrail #9
 forbids RE-probing the SAME surface and running PAST the caps; it does NOT license
 quitting early. Breadth across NEW hosts and surfaces is precisely what the budget is
 for — use it.
@@ -321,8 +324,9 @@ one per framework, for debug/stack-trace pages left on in prod),
 `cors_credentialed_probe(url, paths)` (reflected-Origin + credentials CORS probe — returns
 `misconfigured` targets any site could read logged-in data from; catches what check_http_posture cannot),
 `mass_assignment_probe(url, endpoints)` (WRITE — POST create/update endpoints with injected privileged
-fields; returns `findings` where a role/credits/plan field was accepted+echoed → privilege_escalation/
-mass_assignment; object_put-gated; pass the POST-able endpoints discover_paths found),
+fields, then READ BACK the created record; returns `findings` (mass_assignment) ONLY when a field is
+confirmed PERSISTED on read-back — echo alone never fires and it never emits privilege_escalation;
+object_put-gated; creates synthetic kuvprobe rows noted for purge; pass the POST-able endpoints found),
 `user_enum_probe(url, endpoints)` (account-existence oracle on login/signup/forgot via SYNTHETIC emails
 only — returns `findings` (user_enumeration)),
 `ssrf_probe(url, sinks)` (response-reflected SSRF via a URL param + external canary — returns `findings`
