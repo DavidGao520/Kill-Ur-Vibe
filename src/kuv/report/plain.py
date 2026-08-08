@@ -34,6 +34,13 @@ TYPE_TITLES: dict[FindingType, str] = {
     FindingType.JWT_FORGEABLE: "Login tokens can be forged, letting anyone impersonate any user",
     FindingType.SSRF: "The server can be tricked into fetching internal or attacker-chosen URLs",
     FindingType.OPEN_REDIRECT: "Your site can be used to bounce visitors to a scam page",
+    FindingType.EXPOSED_SECRET_FILE: "A secrets or source-code file is downloadable from your site",
+    FindingType.EXPOSED_SERVICE_INTERFACE: "An internal admin/diagnostics page is open to the public",
+    FindingType.WEBHOOK_UNVERIFIED: "Anyone can forge payment events because they aren't signature-checked",
+    FindingType.VERBOSE_ERROR_DISCLOSURE: "Error pages leak your code's internal details (stack traces)",
+    FindingType.CREDENTIALED_CORS: "Any other website can read your users' logged-in data",
+    FindingType.USER_ENUMERATION: "Your login/signup reveals which email addresses have accounts",
+    FindingType.BROKEN_FUNCTION_AUTH: "An admin-only feature works without logging in",
 }
 
 # One plain sentence per severity — what it means for the reader's calendar.

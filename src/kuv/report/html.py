@@ -265,6 +265,7 @@ def assemble_html_report(
     subtitle: str = "Executive security report",
     core_result: str = "",
     secrets: Iterable[str] = (),
+    coverage_note: str = "",
 ) -> str:
     secrets = tuple(secrets)
     ordered = sorted(findings, key=lambda f: (_SEV_ORDER.index(f.severity()),
@@ -349,10 +350,17 @@ def assemble_html_report(
     )
     callout = f'<div class="callout"><b>Decision needed:</b> {_e(decision_needed, secrets)}</div>' if decision_needed else ""
 
+    coverage_html = (
+        '<div style="margin:0 0 14px;padding:10px 14px;border-left:4px solid #b45309;'
+        'background:#fef3c7;color:#92400e;border-radius:4px;font-size:13px">'
+        f'⚠️ {html.escape(coverage_note.strip())}</div>'
+        if coverage_note.strip() else ""
+    )
     exec_page = f"""
 <section class="page">
   {_hdr(target, prepared_for, date_str)}
   <h2 class="section">Executive Brief</h2>
+  {coverage_html}
   {callout}
   <div class="stats">{exec_tiles}</div>
   <div class="executive">{_md(glosser.gloss(_scrub(exec_brief, secrets)), secrets)}</div>

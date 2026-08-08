@@ -9,12 +9,13 @@ pass guarantees no secret VALUE ever reaches the output (the 3rd safety gate).
 from .findings import Finding
 from .html import assemble_html_report
 from .redaction import redact_pii, redact_secrets
-from .report import assemble_report
+from .report import assemble_report, coverage_note_from_audit
 
 __all__ = [
     "Finding",
     "assemble_html_report",
     "assemble_report",
+    "coverage_note_from_audit",
     "redact_pii",
     "redact_secrets",
 ]

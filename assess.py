@@ -25,7 +25,7 @@ from urllib.parse import urlparse  # noqa: E402
 from kuv.agent.spine import run_assessment  # noqa: E402
 from kuv.egress import RunBudget  # noqa: E402
 from kuv.gate import load_scope_file  # noqa: E402
-from kuv.report import assemble_html_report, assemble_report  # noqa: E402
+from kuv.report import assemble_html_report, assemble_report, coverage_note_from_audit  # noqa: E402
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -67,12 +67,16 @@ def main(argv: list[str]) -> int:
         max_turns=max_turns, max_budget_usd=max_usd,
     ))
 
+    coverage_note = coverage_note_from_audit(result.audit)
     report = assemble_report(
         result.findings,
         exec_brief=result.final_text or "(agent produced no summary)",
         target=target,
+        coverage_note=coverage_note,
     )
     print("\n" + report)
+    if coverage_note:
+        print(f"\n⚠️  {coverage_note}")
 
     # Polished HTML report (print-to-PDF friendly), written to runs/ (gitignored).
     host = urlparse(target).hostname or target.replace("/", "_")
@@ -82,6 +86,7 @@ def main(argv: list[str]) -> int:
         exec_brief=result.final_text or "(agent produced no summary)",
         prepared_for=scope.engagement_id,  # audit label, not the operator's email
         date_str=date.today().isoformat(),
+        coverage_note=coverage_note,
     )
     os.makedirs("runs", exist_ok=True)
     html_path = os.path.join("runs", f"{host}-{date.today().isoformat()}.html")

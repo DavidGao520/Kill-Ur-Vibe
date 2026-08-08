@@ -40,6 +40,13 @@ class FindingType(str, Enum):
     JWT_FORGEABLE = "jwt_forgeable"                       # alg=none / weak secret / forged token accepted
     SSRF = "ssrf"                                         # server fetches an attacker-controlled URL
     OPEN_REDIRECT = "open_redirect"                       # redirect to an attacker URL (phishing aid)
+    EXPOSED_SECRET_FILE = "exposed_secret_file"           # served .env / .git / backup / dump — source & secret disclosure
+    EXPOSED_SERVICE_INTERFACE = "exposed_service_interface"  # unauth admin/ops/diagnostics panel (actuator/phpinfo/server-status)
+    WEBHOOK_UNVERIFIED = "webhook_unverified"            # payment/webhook receiver accepts unsigned (forgeable) events
+    VERBOSE_ERROR_DISCLOSURE = "verbose_error_disclosure"  # stack-trace / framework debug page (debug mode left on in prod)
+    CREDENTIALED_CORS = "credentialed_cors"              # reflected Origin + ACAC:true — any site reads logged-in data
+    USER_ENUMERATION = "user_enumeration"                # login/signup/reset reveals which emails have accounts
+    BROKEN_FUNCTION_AUTH = "broken_function_auth"        # a privileged/admin function is reachable without auth (BFLA, unauth slice)
 
 
 class NeedsOperatorSeverity(Exception):
@@ -82,6 +89,27 @@ _STATIC: dict[FindingType, Severity] = {
     FindingType.SSRF: Severity.HIGH,
     # Open redirect: mostly a phishing aid on its own.
     FindingType.OPEN_REDIRECT: Severity.LOW,
+    # A served .env / .git / backup / DB dump discloses source and (usually) live
+    # secrets — High (treat every secret it contained as leaked).
+    FindingType.EXPOSED_SECRET_FILE: Severity.HIGH,
+    # An unauthenticated admin/ops/diagnostics interface (Spring actuator, phpinfo,
+    # mod_status) leaks configuration/internals — Medium.
+    FindingType.EXPOSED_SERVICE_INTERFACE: Severity.MEDIUM,
+    # A webhook/payment receiver that accepts unsigned events lets anyone forge a
+    # provider event (fake "payment succeeded", grant credits) — High.
+    FindingType.WEBHOOK_UNVERIFIED: Severity.HIGH,
+    # A stack-trace / framework debug page leaks source paths, versions, and internals —
+    # a recon aid on its own, not direct data loss → Low (honest floor, not inflated).
+    FindingType.VERBOSE_ERROR_DISCLOSURE: Severity.LOW,
+    # Server reflects an arbitrary Origin AND sets Access-Control-Allow-Credentials: true,
+    # so any website can make credentialed cross-origin reads of a logged-in user's data — High.
+    FindingType.CREDENTIALED_CORS: Severity.HIGH,
+    # An account-existence oracle (login/signup/reset reveals which emails are registered)
+    # aids targeted phishing/credential-stuffing — real but indirect → Medium.
+    FindingType.USER_ENUMERATION: Severity.MEDIUM,
+    # A privileged/admin FUNCTION reachable with no auth (unauth BFLA) exposes admin data
+    # or actions to anyone → High.
+    FindingType.BROKEN_FUNCTION_AUTH: Severity.HIGH,
 }
 
 # Priority bucket = impact-over-effort ordering, keyed off the assigned severity.
