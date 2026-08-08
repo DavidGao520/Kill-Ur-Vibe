@@ -36,6 +36,16 @@ TOOL_NAMES = (
     "mcp__kuvnet__discover_paths",
     "mcp__kuvnet__probe_api_unauth",
     "mcp__kuvnet__render_page",
+    "mcp__kuvnet__fingerprint_stack",
+    "mcp__kuvnet__templated_checks",
+    "mcp__kuvnet__backend_rls_probe",
+    "mcp__kuvnet__webhook_sig_probe",
+    "mcp__kuvnet__error_leak_probe",
+    "mcp__kuvnet__cors_credentialed_probe",
+    "mcp__kuvnet__mass_assignment_probe",
+    "mcp__kuvnet__user_enum_probe",
+    "mcp__kuvnet__ssrf_probe",
+    "mcp__kuvnet__func_authz_probe",
 )
 
 
@@ -268,6 +278,144 @@ def build_network_server(session: AssessmentSession):
     async def render_page_tool(args):
         return _wrap(await session.render_page(args["url"]))
 
+    @tool(
+        "fingerprint_stack",
+        "Deterministically fingerprint an in-scope URL's tech stack (framework / CMS / "
+        "BaaS / hosting / payment / auth) from headers + body + shipped-script hosts. "
+        "Recon only, no finding. Run it EARLY: the `tags`/`detections` it returns tell "
+        "you which stack-specific probes to run (Supabase → unauth /rest/v1 + RLS, "
+        "WordPress → /wp-json user enum, Stripe → webhook-signature test) instead of the "
+        "same generic sequence on every site.",
+        {"url": str},
+    )
+    async def fingerprint_stack_tool(args):
+        return _wrap(await session.fingerprint_stack(args["url"]))
+
+    @tool(
+        "templated_checks",
+        "Run the curated SAFE exposure-check library against an in-scope base URL: a "
+        "single GET per check, each matched on a POSITIVE content signature (so a SPA's "
+        "200-for-everything shell is never a false hit). Catches served `.env` / `.git` / "
+        "DB-dump/backup files (exposed_secret_file), unauth admin/ops panels — Spring "
+        "actuator / phpinfo / mod_status (exposed_service_interface), and public "
+        "OpenAPI/Swagger schemas (info_disclosure). Returns deterministic `exposed` "
+        "candidates — record each with record_finding using the given finding_type "
+        "(severity comes from the rule table, not you). Run in recon on every live host.",
+        {"url": str},
+    )
+    async def templated_checks_tool(args):
+        return _wrap(await session.templated_checks(args["url"]))
+
+    @tool(
+        "backend_rls_probe",
+        "Stack-specific (run after fingerprint_stack detects a BaaS: Supabase / Firebase / "
+        "PocketBase / Appwrite): does the backend data API return rows with NO auth — i.e. "
+        "Row-Level Security not enforced (the #1 vibe-coded bug)? One gated GET per common "
+        "table name; a candidate is returned ONLY on a positive JSON-data signature, never an "
+        "empty result / error / SPA HTML shell. Pass the BaaS base `url` and, for Supabase, the "
+        "anon `apikey` scan_js surfaced (without it Supabase 401s everything). `style` "
+        "auto-detects (firebase vs supabase). Record each `open_tables` entry with "
+        "record_finding (type unauth_read_sensitive; severity from the rule table).",
+        {"url": str, "apikey": str, "style": str},
+    )
+    async def backend_rls_probe_tool(args):
+        return _wrap(await session.backend_rls_probe(
+            args["url"], apikey=args.get("apikey") or None, style=args.get("style") or None))
+
+    @tool(
+        "webhook_sig_probe",
+        "Stack-specific WRITE probe (run after fingerprint_stack detects Stripe / a webhook "
+        "integration): POST an UNSIGNED synthetic event (benign type, NON-EXISTENT object ids) "
+        "to common receiver paths; a receiver that accepts it does not verify signatures, so "
+        "events are forgeable (webhook_unverified). Blast radius is bounded — no valid signature "
+        "+ fake ids mean a non-verifying handler has no real object to touch. Gated as an "
+        "OBJECT_PUT write: on a live target it needs write-authorization + operator confirmation, "
+        "otherwise it returns that requirement. Record each `unverified` entry with record_finding.",
+        {"url": str},
+    )
+    async def webhook_sig_probe_tool(args):
+        return _wrap(await session.webhook_sig_probe(args["url"]))
+
+    @tool(
+        "error_leak_probe",
+        "Probe discovered endpoints with a malformed query and report REAL debug / stack-trace "
+        "pages (framework debug mode left on in production), collapsed to one per framework. Pass "
+        "`url` (base) and `paths` (the relative endpoints discover_paths / render_page surfaced; a "
+        "small starter set is used if omitted). Single GET each; a leak is returned only on a "
+        "positive traceback signature, never a normal styled error page. Record each `leaks` entry "
+        "with record_finding (type verbose_error_disclosure; severity from the rule table).",
+        {"url": str, "paths": list},
+    )
+    async def error_leak_probe_tool(args):
+        return _wrap(await session.error_leak_probe(args["url"], args.get("paths")))
+
+    @tool(
+        "cors_credentialed_probe",
+        "Detect the exploitable CORS case check_http_posture misses: the server REFLECTS an "
+        "arbitrary Origin AND sets Access-Control-Allow-Credentials: true, so any website can read "
+        "a logged-in user's data (credentialed_cors). One gated GET per target carrying a benign "
+        "attacker-shaped Origin; a finding only when the response reflects that Origin (or 'null') "
+        "WITH credentials true. Pass `url` (base) and optional `paths`. Record each `misconfigured` "
+        "entry with record_finding (severity from the rule table).",
+        {"url": str, "paths": list},
+    )
+    async def cors_credentialed_probe_tool(args):
+        return _wrap(await session.cors_credentialed_probe(args["url"], args.get("paths")))
+
+    @tool(
+        "mass_assignment_probe",
+        "WRITE probe: for each create/update endpoint, POST a benign synthetic object then the "
+        "same object with injected privileged fields (role/is_admin/credits/plan/...); a finding "
+        "is returned when the JSON response ECHOES an injected field with the injected value "
+        "(server accepted it) — role/admin/permission => privilege_escalation, else "
+        "mass_assignment. Pass `url` (base) and `endpoints` (POST-able collections discover_paths "
+        "found; a small default set if omitted). Gated as OBJECT_PUT (needs write-auth + confirm). "
+        "Creates synthetic records (marker names, non-existent ids). Record each `findings` entry.",
+        {"url": str, "endpoints": list},
+    )
+    async def mass_assignment_probe_tool(args):
+        return _wrap(await session.mass_assignment_probe(args["url"], args.get("endpoints")))
+
+    @tool(
+        "user_enum_probe",
+        "Detect an account-existence oracle (login/signup/forgot that reveals which emails are "
+        "registered). Uses ONLY synthetic kuv-probe identifiers — never a real user email. "
+        "Availability GETs are passive; login/forgot POSTs gate as auth_change. A finding only on "
+        "a boolean existence indicator or an explicit existence-disclosing differential (never a "
+        "uniform non-disclosing response). Pass `url` (base) and optional `endpoints`. Record each "
+        "`findings` entry (type user_enumeration).",
+        {"url": str, "endpoints": list},
+    )
+    async def user_enum_probe_tool(args):
+        return _wrap(await session.user_enum_probe(args["url"], args.get("endpoints")))
+
+    @tool(
+        "ssrf_probe",
+        "Detect RESPONSE-REFLECTED SSRF: a URL parameter the server fetches and echoes back "
+        "(proving it fetches arbitrary/internal URLs). Sends a benign external canary and flags "
+        "only when the FETCHED content is reflected; internal targets add a status differential "
+        "only (never their content — no metadata dumped). Pass `url` (base) and optional `sinks` "
+        "([[path, param], ...]; default = root × a URL-param catalog). Induces server-side "
+        "requests, so it is gated behind OBJECT_PUT write authorization. Record each `findings` "
+        "entry (type ssrf). Reflected-only — blind SSRF needs an out-of-band collaborator.",
+        {"url": str, "sinks": list},
+    )
+    async def ssrf_probe_tool(args):
+        return _wrap(await session.ssrf_probe(args["url"], args.get("sinks")))
+
+    @tool(
+        "func_authz_probe",
+        "Detect broken function-level authorization (BFLA), unauthenticated slice: a "
+        "privileged/admin-NAMED route reachable with NO auth returning privileged data. GET only "
+        "(safe). Distinct from object-level IDOR and from templated file-exposure. Pass `url` "
+        "(base) and optional `routes` (a default admin/internal catalog is used otherwise). "
+        "Record each `findings` entry (type broken_function_auth). The full BFLA (a normal user "
+        "calling an admin route) needs the Wave-2b two-identity scan.",
+        {"url": str, "routes": list},
+    )
+    async def func_authz_probe_tool(args):
+        return _wrap(await session.func_authz_probe(args["url"], args.get("routes")))
+
     return create_sdk_mcp_server(
         SERVER_NAME,
         "0.1.0",
@@ -288,5 +436,15 @@ def build_network_server(session: AssessmentSession):
             discover_paths_tool,
             probe_api_unauth_tool,
             render_page_tool,
+            fingerprint_stack_tool,
+            templated_checks_tool,
+            backend_rls_probe_tool,
+            webhook_sig_probe_tool,
+            error_leak_probe_tool,
+            cors_credentialed_probe_tool,
+            mass_assignment_probe_tool,
+            user_enum_probe_tool,
+            ssrf_probe_tool,
+            func_authz_probe_tool,
         ],
     )

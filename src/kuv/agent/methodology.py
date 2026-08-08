@@ -98,7 +98,46 @@ or one not listed at all (see the escape hatch under OUTPUT). Adaptivity is the 
 **Phase 1 — RECON / surface mapping.** Read the target root and shipped JS; enumerate
 endpoints, routes, and forms; inventory every backing surface (websockets, REST/GraphQL
 APIs, object stores / pre-signed signers, OAuth, third-party hosts) and library
-fingerprints. Use `discover_paths(url)` to pull the route/endpoint list straight out of the
+fingerprints.
+
+**FINGERPRINT FIRST, THEN BRANCH — this is what stops every report looking the same.**
+Run `fingerprint_stack(url)` EARLY on each live host; its `tags`/`detections` decide which
+STACK-SPECIFIC probe to unlock instead of one generic sequence:
+- **BaaS (Supabase / Firebase / PocketBase / Appwrite)** → `backend_rls_probe(url, apikey=...)`
+  — the #1 vibe-coded bug is a data API readable with no auth (Row-Level Security not
+  enforced). For Supabase pass the anon `apikey` scan_js surfaced (without it every table
+  401s). Record each `open_tables` entry (unauth_read_sensitive).
+- **Stripe / a payment or webhook integration** → `webhook_sig_probe(url)` — POSTs an
+  unsigned synthetic event to common receiver paths; a receiver that accepts it is not
+  verifying signatures (webhook_unverified). WRITE-tier: gated as object_put, so it needs
+  write-authorization + confirmation on a live target.
+- **Any host** → `error_leak_probe(url, paths=[…discovered endpoints…])` for framework
+  debug/stack-trace pages (verbose_error_disclosure), and `cors_credentialed_probe(url)`
+  for the reflected-Origin + credentials CORS hole (credentialed_cors) that the static
+  `check_http_posture` header check cannot see.
+- WordPress → `/wp-json/wp/v2/users` user enumeration; Next.js → `/api/*` routes + source
+  maps (`check_source_map`). Record each returned candidate with record_finding — the
+  finding_type is given; severity comes from the rule table, never you.
+Also run `templated_checks(url)` on every live host — a curated
+set of SAFE single-GET checks (matched on real content, never a SPA's 200-for-everything
+shell) that catch served `.env`/`.git`/backup files (`exposed_secret_file`) and unauth
+admin/ops panels — Spring actuator / phpinfo / mod_status (`exposed_service_interface`) —
+plus public OpenAPI schemas (`info_disclosure`). Record EVERY `exposed` item it returns
+with record_finding using the given `finding_type` (severity comes from the rule table).
+
+**MANDATORY when the stack is a client-rendered SPA.** If `fingerprint_stack` reports a
+client-rendered SPA framework (React / Create React App / Vue / Svelte / Angular / a bare
+Vite build) AND `http_get`/`discover_paths` on the root return essentially an app SHELL
+(a `<div id="root">` + a bundle, few real routes in the HTML), you MUST run
+`render_page(url)` — the real backend API on such a stack is built and called only at
+RUNTIME (e.g. `fetch('/v1/' + resource)`), so it appears in NO static string extraction.
+`render_page` is the ONLY tool that observes those runtime XHR/fetch endpoints; then feed
+them to `probe_api_unauth`. **Skipping render_page on an SPA is exactly how an
+unauthenticated data API (a `/v1/search`-class Critical) gets missed — `probe_api_unauth`
+can only test routes something first discovered.** Do not conclude the API surface is
+mapped on an SPA until you have rendered it.
+
+Use `discover_paths(url)` to pull the route/endpoint list straight out of the
 page + its JS bundles (SPA router tables live in the bundle — that is where routes like
 `/account/login` and `/events` hide); add `probe_wordlist=true` to also probe
 common/sensitive paths (`/admin`, `/api`, `/.env`, `/.git/config`). If
@@ -189,6 +228,10 @@ report).
 For the registrable domain (apex):
   □ `enumerate_subdomains(apex)` run; `check_email_auth(apex)` run.
 For EVERY live host it returns — not just the one URL you were handed:
+  □ `fingerprint_stack` it, then run the stack-specific probes its result unlocks.
+  □ if it is a client-rendered SPA (per fingerprint) → `render_page` it BEFORE concluding
+    the API surface is mapped; its real API lives in runtime JS, not the static shell.
+  □ `templated_checks(url)` — record every `exposed` item it returns.
   □ `http_get` its root AND `discover_paths(url, probe_wordlist=true)`.
   □ `scan_js` on every shipped JS bundle you find on it.
   □ `probe_api_unauth(url)` on every host with any `/v1|/api|/graphql` or otherwise
@@ -262,6 +305,30 @@ optionally probe a curated path wordlist — the surface map, run this early in 
 `probe_websocket(url, read_json, write_json, origin)` (unauth websocket read/write probe with a
 values-free field summary — the ONLY way to reach the unauth-websocket finding classes),
 `check_http_posture(url)` (deterministic CSP/cookie/CORS/HSTS gap list),
+`fingerprint_stack(url)` (deterministic tech-stack detection — framework/CMS/BaaS/hosting/
+payment/auth; run EARLY and BRANCH your probes on its result — this is the main cure for
+same-looking reports),
+`templated_checks(url)` (curated SAFE single-GET exposure library — served .env/.git/backup
+files, unauth actuator/phpinfo/mod_status panels, public OpenAPI schemas; content-matched so
+a SPA shell is never a false hit; returns `exposed` candidates to record_finding),
+`backend_rls_probe(url, apikey, style)` (BaaS unauth-read probe — unlock when fingerprint_stack
+detects Supabase/Firebase/PocketBase/Appwrite; returns `open_tables` readable without auth, the
+#1 vibe-coded bug; pass the Supabase anon apikey scan_js found),
+`webhook_sig_probe(url)` (WRITE probe — unlock on Stripe/webhook detection; POSTs an unsigned
+synthetic event and returns `unverified` receivers that skip signature checks; object_put-gated),
+`error_leak_probe(url, paths)` (malformed-query probe of discovered endpoints — returns `leaks`,
+one per framework, for debug/stack-trace pages left on in prod),
+`cors_credentialed_probe(url, paths)` (reflected-Origin + credentials CORS probe — returns
+`misconfigured` targets any site could read logged-in data from; catches what check_http_posture cannot),
+`mass_assignment_probe(url, endpoints)` (WRITE — POST create/update endpoints with injected privileged
+fields; returns `findings` where a role/credits/plan field was accepted+echoed → privilege_escalation/
+mass_assignment; object_put-gated; pass the POST-able endpoints discover_paths found),
+`user_enum_probe(url, endpoints)` (account-existence oracle on login/signup/forgot via SYNTHETIC emails
+only — returns `findings` (user_enumeration)),
+`ssrf_probe(url, sinks)` (response-reflected SSRF via a URL param + external canary — returns `findings`
+(ssrf); object_put-gated since it induces server-side fetches; reflected-only, not blind),
+`func_authz_probe(url, routes)` (unauth BFLA — a privileged/admin route reachable with no auth returning
+privileged data; returns `findings` (broken_function_auth); GET-only, distinct from object-level IDOR),
 `analyze_oauth(authorize_url)` (deterministic OAuth state/PKCE/hd gap list),
 `check_tls(host)` (deterministic cert validity/expiry/hostname/protocol gap list),
 `render_page(url)` (headless-browser render of a JS SPA — reports the real XHR/fetch API
@@ -325,9 +392,10 @@ destruction — STOP and report to the operator. That instinct is the product.
 def task_prompt(target: str) -> str:
     return (
         f"Assess {target}. FIRST map the WHOLE attack surface: enumerate_subdomains on "
-        f"the registrable domain, then for EVERY live host run discover_paths + "
-        f"probe_api_unauth + scan_js on its bundles — do NOT stop at the single host you "
-        f"were handed. THEN reason about authorization on every surface you discover: can "
+        f"the registrable domain, then for EVERY live host run fingerprint_stack (and "
+        f"BRANCH into the stack-specific probes it unlocks) + templated_checks + "
+        f"discover_paths + probe_api_unauth + scan_js on its bundles — do NOT stop at the "
+        f"single host you were handed. THEN reason about authorization on every surface: can "
         f"an UNAUTHENTICATED caller read or write it? can ONE user reach ANOTHER user's "
         f"objects (IDOR)? does a signup/update payload honor privilege fields it "
         f"shouldn't (privilege escalation / mass-assignment)? are login tokens forgeable? "
